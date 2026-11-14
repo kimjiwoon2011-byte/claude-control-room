@@ -1,0 +1,17 @@
+# 관제실이 쓰면서 만드는 것 — 저장소에 올리지 않는다
+# 설정·기록·감독관 보고 (claude-code-router 열쇠가 평문으로 들어 있을 수 있다)
+data/
+# 기록 폴더를 다른 곳으로 옮겼을 때 그 위치를 적어 두는 파일
+config.json
+# 에이전트가 일하는 기본 작업 폴더 (새 설치는 workspace, 예전 설치는 작업실)
+workspace/
+작업실/
+# 저장하다 남은 임시 파일
+*.tmp
+
+# OS·편집기가 만드는 것
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+node_modules/

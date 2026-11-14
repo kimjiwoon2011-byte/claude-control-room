@@ -1,0 +1,4 @@
+# 글 파일은 어느 PC에서 받아도 LF 로, 윈도 배치 파일만 CRLF 로 (명령창이 LF 배치 파일을 잘못 읽는 경우가 있다)
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ico binary
