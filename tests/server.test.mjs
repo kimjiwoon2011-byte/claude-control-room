@@ -552,6 +552,59 @@ test('첨부: 팀장에게 보내면 일꾼들의 작업 폴더마다 같은 자
   }
 });
 
+// ───────────────────────── 결과 미리 보기 ─────────────────────────
+
+const previewBase = s => `http://127.0.0.1:${s.app.preview.port}/p/${s.app.preview.key}`;
+const rawGet = (port, p, host) => new Promise((resolve, reject) => {
+  http.get({ host: '127.0.0.1', port, path: p, headers: host ? { Host: host } : {} }, res => {
+    let body = '';
+    res.on('data', c => { body += c; });
+    res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
+  }).on('error', reject);
+});
+
+test('미리 보기: 일꾼이 고친 웹 페이지를 기록에 붙이고, 관제실과 다른 주소에서 바깥 연결을 막은 채 보여 준다', async () => {
+  await withServer(async srv => {
+    fs.writeFileSync(path.join(srv.home, 'work', 'index.html'), '<!doctype html><button>로그인</button>');
+    let s = await srv.until(st => st.app.preview, '미리 보기 서버가 켜짐');
+    assert.notEqual(s.app.preview.port, srv.port);   // 같은 주소면 그 페이지가 관제실 화면에 손댈 수 있다
+    await send(srv, '빠르게 버튼 고쳐 줘');
+    s = await srv.until(st => st.history[0]?.status === 'done', '일 끝남');
+    assert.equal(s.history[0].preview, 'index.html');
+    const res = await fetch(`${previewBase(s)}/a1/index.html`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /^text\/html/);
+    assert.match(res.headers.get('content-security-policy'), /connect-src 'self'/);
+    assert.equal(await res.text(), '<!doctype html><button>로그인</button>');
+    // 웹 페이지를 고치지 않은 일에는 붙이지 않는다
+    await send(srv, '설정 보기');
+    s = await srv.until(st => st.history.length === 2 && st.history[0].status === 'done', '두 번째 일 끝남');
+    assert.equal(s.history[0].preview, undefined);
+  });
+});
+
+test('미리 보기: 번호가 틀리거나, 작업 폴더 밖(.. ·정션)이거나, 내 PC 주소가 아니면 주지 않는다', async () => {
+  await withServer(async srv => {
+    const work = path.join(srv.home, 'work');
+    fs.writeFileSync(path.join(work, 'index.html'), 'ok');
+    fs.writeFileSync(path.join(srv.home, 'secret.txt'), 'SECRET');
+    fs.mkdirSync(path.join(srv.home, 'outside'));
+    fs.writeFileSync(path.join(srv.home, 'outside', 'x.txt'), 'SECRET');
+    fs.symlinkSync(path.join(srv.home, 'outside'), path.join(work, 'link'), 'junction');
+    const s = await srv.until(st => st.app.preview, '미리 보기 서버가 켜짐');
+    const { port, key } = s.app.preview;
+    assert.equal((await rawGet(port, `/p/${key}/a1/index.html`)).status, 200);
+    assert.equal((await rawGet(port, `/p/${key}/a1/`)).body, 'ok');   // 폴더면 그 안의 index.html
+    for (const p of [`/p/${'0'.repeat(key.length)}/a1/index.html`, `/p/${key}/nobody/index.html`, `/p/${key}/a1/../secret.txt`,
+      `/p/${key}/a1/..%2f..%2fsecret.txt`, `/p/${key}/a1/..%5csecret.txt`, `/p/${key}/a1/link/x.txt`]) {
+      const r = await rawGet(port, p);
+      assert.equal(r.status, 404, p);
+      assert.ok(!r.body.includes('SECRET'), p);
+    }
+    assert.equal((await rawGet(port, `/p/${key}/a1/index.html`, 'evil.example')).status, 403);
+  });
+});
+
 // ───────────────────────── 설정·진단 정보 ─────────────────────────
 
 test('알림·효과 설정을 바꾸면 관제실을 다시 켜도 그대로다', async () => {

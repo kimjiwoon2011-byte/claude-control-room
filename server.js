@@ -323,7 +323,10 @@ function sendAgents() {
 }
 
 const APP_VERSION = readJson(path.join(ROOT, 'package.json'))?.version || '';
-const appInfo = () => ({ url: `http://${HOST}:${PORT}/`, version: APP_VERSION, dataDir: DATA_DIR, dataFixed: !!DATA_ARG, defaultDataDir: DEFAULT_DATA_DIR });
+const appInfo = () => ({
+  url: `http://${HOST}:${PORT}/`, version: APP_VERSION, dataDir: DATA_DIR, dataFixed: !!DATA_ARG, defaultDataDir: DEFAULT_DATA_DIR,
+  preview: previewPort ? { port: previewPort, key: PREVIEW_KEY } : null,   // 결과 미리 보기 서버 (켜지기 전엔 없음)
+});
 
 // 문제를 알릴 때 붙이는 진단 정보. 열쇠와 시킨 일(프롬프트)·AI 가 한 말은 넣지 않고, 사용자 이름이 든 홈 폴더 경로는 ~ 로 가린다.
 function diagnostics() {
@@ -1137,6 +1140,8 @@ function endTurn(a, { status, text = '', ev = null }) {
       id: newId(), agentId: a.id, agentName: a.name, color: a.color, prompt: cur.prompt,
       result: String(text || '').slice(0, 40000), status, at: cur.startedAt, ms, tokens, turns: ev?.num_turns ?? null,
     };
+    const preview = status === 'done' ? previewOf(a, cur) : null;   // 이번 일에서 만들거나 고친 웹 페이지 (화면이 바로 띄운다)
+    if (preview) item.preview = preview;
     cur.historyId = item.id;
     a.failedCarry = status === 'error' ? { historyId: item.id, ...carry(cur) } : null;   // ⇄ 로 막힌 일을 넘길 때 보고 카드·고치기 차례를 이어 가게
     history.unshift(item);
@@ -2704,9 +2709,11 @@ async function route(method, p, b) {
   return fail(404, t('없는 주소예요'));
 }
 
+const LOCAL_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;   // 내 PC 주소로 온 요청만 받는다 (관제실·미리 보기 서버 둘 다)
+
 async function handle(req, res) {
   // DNS 리바인딩 공격 막기: 내 PC 주소로 들어온 요청만 받는다
-  if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(req.headers.host || '')) return sendJson(res, 403, { error: t('허용되지 않은 주소예요') });
+  if (!LOCAL_HOST.test(req.headers.host || '')) return sendJson(res, 403, { error: t('허용되지 않은 주소예요') });
   const url = new URL(req.url, `http://${HOST}`);
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
     if (url.searchParams.has('k')) return enterWithCode(res, url.searchParams.get('k'));
@@ -2739,6 +2746,77 @@ const server = http.createServer((req, res) => {
     sendJson(res, 500, { error: t('서버 오류: {why}', { why: e.message }) });
   });
 });
+
+// ───────────────────────── 결과 미리 보기 ─────────────────────────
+// 일꾼이 만든 웹 페이지를 화면 오른쪽 창에 띄운다. 관제실과 다른 주소(빈 포트)의 작은 서버로 보여 준다:
+// 같은 주소에서 띄우면 그 페이지의 스크립트가 관제실 화면에 손대 열쇠를 가져갈 수 있다.
+// 주소에는 켤 때마다 바뀌는 번호(PREVIEW_KEY)를 넣어 다른 웹사이트가 작업 폴더 파일을 짐작해 읽지 못하게 한다.
+// 이 번호는 미리 보는 페이지도 알게 되지만, 그걸로는 작업 폴더를 읽는 것밖에 못 한다 (관제실 열쇠와는 다르다).
+const PREVIEW_KEY = crypto.randomBytes(12).toString('hex');
+let previewPort = 0;
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg', '.mp4': 'video/mp4', '.webm': 'video/webm', '.wasm': 'application/wasm', '.webmanifest': 'application/manifest+json',
+};
+// 미리 보는 페이지가 바깥으로 연결하지 못하게 한다: AI 는 샌드박스에서 인터넷을 못 써도, 만든 페이지는 브라우저(인터넷 됨)에서 돈다.
+// 그래서 읽은 파일을 페이지에 담아 밖으로 보내는 길을 막는다. 많이 쓰는 CDN 의 스크립트·글꼴만 받는다.
+const CDN = 'https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://esm.sh';
+const PREVIEW_CSP = [
+  `default-src 'self' data: blob:`,
+  `script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: ${CDN}`,
+  `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${CDN}`,
+  `font-src 'self' data: https://fonts.gstatic.com ${CDN}`,
+  `img-src 'self' data: blob:`, `media-src 'self' data: blob:`,
+  `connect-src 'self'`, `form-action 'self'`, `frame-src 'self'`, `base-uri 'self'`,
+].join('; ');
+
+const isFile = p => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+const inside = (root, p) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };
+
+// 이번 일에서 보여 줄 웹 페이지 (작업 폴더 기준 경로, '/' 로). 마지막으로 고친 .html 을 고르고, 없으면 고친 파일 옆의 index.html.
+function previewOf(a, cur) {
+  const root = path.resolve(a.cwd);
+  const files = [...(cur.files || [])].map(f => path.resolve(root, f));
+  // GPT 는 명령(Set-Content 등)으로도 파일을 만든다: 명령에 적힌 .html 이름도 본다
+  for (const c of cur.commands || []) for (const m of c.matchAll(/[^\s'"`<>|]+\.html?\b/gi)) files.push(path.resolve(root, m[0]));
+  const mine = files.filter(f => inside(root, f));
+  const pick = mine.filter(f => /\.html?$/i.test(f) && isFile(f)).pop()
+    || mine.map(f => path.join(path.dirname(f), 'index.html')).reverse().find(isFile);
+  return pick ? path.relative(root, pick).split(path.sep).join('/') : null;
+}
+
+// /p/<번호>/<일꾼 id>/<작업 폴더 안 경로> 만 준다. 정션·바로가기로 폴더 밖을 가리키는 것도 막는다 (realpath 로 다시 본다)
+function servePreview(req, res) {
+  const no = (status = 404) => { res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(String(status)); };
+  if (!LOCAL_HOST.test(req.headers.host || '')) return no(403);
+  const m = /^\/p\/([0-9a-f]+)\/([^/]+)\/(.*)$/.exec(req.url.split('?')[0]);
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || !m || m[1] !== PREVIEW_KEY) return no();
+  const a = agents.find(x => x.id === m[2]);
+  let rel;
+  try { rel = decodeURIComponent(m[3]); } catch { return no(); }
+  if (!a || rel.includes('\0')) return no();
+  try {
+    const root = fs.realpathSync(path.resolve(a.cwd));
+    let file = fs.realpathSync(path.resolve(root, rel));
+    if (fs.statSync(file).isDirectory()) file = fs.realpathSync(path.join(file, 'index.html'));
+    if (!inside(root, file) || !isFile(file)) return no();
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+      'Content-Security-Policy': PREVIEW_CSP,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    });
+    if (req.method === 'HEAD') return res.end();
+    fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+  } catch { return no(); }
+}
+
+const previewServer = http.createServer(servePreview);
 
 // ───────────────────────── 켜기·끄기 ─────────────────────────
 
@@ -2791,6 +2869,11 @@ server.listen(PORT, HOST, () => {
   // 여기부터는 이 서버가 포트를 잡은 뒤에만 한다 (또 켠 쪽이 켜져 있는 쪽의 첨부를 지우지 않게)
   try { fs.rmSync(uploadDir(), { recursive: true, force: true }); } catch { /* 보내지 않고 남은 첨부 (지난번에 켰을 때 것) */ }
   try { fs.rmSync(openRequest(), { force: true }); } catch { /* 지난번 쪽지 */ }
+  previewServer.on('error', e => console.error(t('미리 보기 서버를 켜지 못했어요: {why}', { why: e.message })));
+  previewServer.listen(0, HOST, () => {
+    previewPort = previewServer.address().port;
+    broadcast({ type: 'app', app: appInfo() });
+  });
   setInterval(() => {
     if (!fs.existsSync(openRequest())) return;
     try { fs.rmSync(openRequest(), { force: true }); } catch { /* 지우지 못하면 다음에 또 연다 */ }
