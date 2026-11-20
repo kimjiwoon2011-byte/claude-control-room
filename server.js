@@ -10,7 +10,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFile, execFileSync } = require('node:child_process');
 
-// ── 실행 옵션: node server.js [--port 7707] [--no-open] [--data 폴더] [--claude 경로] [--codex 경로] ──
+// ── 실행 옵션: node server.js [--port 7707] [--no-open] [--no-ccr] [--home 폴더] [--data 폴더] [--claude 경로] [--codex 경로] ──
 const argv = process.argv.slice(2);
 const argValue = name => {
   const i = argv.indexOf(`--${name}`);
@@ -19,17 +19,27 @@ const argValue = name => {
 const PORT = Number(argValue('port')) || 7707;
 const HOST = '127.0.0.1';
 const ROOT = __dirname;
-// 저장 폴더(설정·기록): 실행 옵션 --data > 앱 폴더의 config.json 에 고른 폴더 > 앱 폴더의 data
-const CONFIG_FILE = path.join(ROOT, 'config.json');
+// 설정·기록·작업 폴더를 두는 곳. 기본은 앱 폴더이고, --home 을 주면 앱 폴더는 건드리지 않는다 (자동 시험, 여러 벌 따로 쓰기)
+const HOME = path.resolve(argValue('home') || ROOT);
+// 저장 폴더(설정·기록): 실행 옵션 --data > HOME 의 config.json 에 고른 폴더 > HOME 의 data
+const CONFIG_FILE = path.join(HOME, 'config.json');
 const DATA_ARG = argValue('data');
-const DEFAULT_DATA_DIR = path.join(ROOT, 'data');
+const DEFAULT_DATA_DIR = path.join(HOME, 'data');
 let DATA_DIR = path.resolve(DATA_ARG || readJson(CONFIG_FILE)?.dataDir || DEFAULT_DATA_DIR);
 const CLAUDE_ARG = argValue('claude');
 const CODEX_ARG = argValue('codex');
 const OPEN_WINDOW = !argv.includes('--no-open');
-const WORKDIR = path.join(ROOT, 'workspace');   // 처음 켤 때의 기본 작업 폴더 (전부터 쓰던 설치는 저장해 둔 '작업실'을 그대로 쓴다)
+const MANAGE_CCR = !argv.includes('--no-ccr');   // 관제실이 CCR 을 직접 켜고 끌지. --no-ccr 이면 이미 켜져 있는 게이트웨이만 쓴다 (자동 시험, CCR 을 따로 돌리는 경우)
+const WORKDIR = path.join(HOME, 'workspace');   // 처음 켤 때의 기본 작업 폴더 (전부터 쓰던 설치는 저장해 둔 '작업실'을 그대로 쓴다)
 
-const TOKEN = crypto.randomBytes(16).toString('hex');   // 다른 웹사이트가 이 서버를 조종하지 못하게 화면에만 심어 두는 열쇠
+// 이 서버를 조종하는 열쇠. 관제실이 연 창에만 준다: 창은 한 번만 쓰는 번호(BOOT)가 붙은 주소로 들어와 쿠키를 받고,
+// 쿠키가 있어야 열쇠가 든 화면을 받는다. 다른 웹사이트도, 이 PC 의 다른 프로그램(샌드박스 안의 GPT 도 이 PC 주소에는 접속할 수 있다)도
+// 화면을 읽기만 해서는 열쇠를 얻지 못한다. API 는 쿠키가 아니라 열쇠 머리글(x-token)을 본다 — 쿠키는 포트를 가리지 않아 127.0.0.1 의 다른 포트 페이지에도 따라가기 때문
+const TOKEN = crypto.randomBytes(16).toString('hex');
+const COOKIE = `cr_session_${PORT}`;
+const BOOT = new Map();                   // 창 열기 번호 → 쓸 수 있는 마지막 시각
+const BOOT_TTL = 10 * 60_000;
+const openRequest = () => path.join(DATA_DIR, 'open-window.req');   // 관제실을 또 켜면 이 쪽지를 남겨 이미 켜진 쪽이 새 창을 열게 한다 (샌드박스는 작업 폴더 밖에 못 써서 흉내 낼 수 없다)
 const MIN_AGENTS = 1;
 const MAX_AGENTS = 8;
 const LOG_KEEP = 300;                     // 에이전트마다 기억하는 로그 줄 수
@@ -53,6 +63,15 @@ const TOOL_KO = {
   TodoWrite: '할 일', Task: '도우미', Agent: '도우미', LS: '폴더 보기',
 };
 const STATUS_KO = { done: '완료', error: '오류', stopped: '중지됨' };
+// 일꾼 수(1~8명)에 들어가지 않는 관리하는 자리. 실행·기록은 일꾼과 같은 코드를 쓰고, id 가 곧 자리 이름이다.
+const STAFF_KEYS = ['supervisor', 'lead', 'security', 'tester'];
+const STAFF_NAME = { supervisor: '감독관', lead: '팀장', security: '보안 검사관', tester: '테스터' };
+const STAFF_COLOR = { supervisor: '#FFD23F', lead: '#B58CFF', security: '#6AA9FF', tester: '#5FD08A' };
+const REVIEW_STAGES = ['supervisor', 'security', 'tester'];   // 일꾼이 끝낸 일을 이 차례로 검사한다 (꺼진 자리는 건너뛴다)
+const REPORT_DONE = ['pass', 'left', 'stopped'];
+const PLAN_KEEP = 30;                     // 팀장 계획 수
+const PLAN_LIVE = ['planning', 'proposed', 'running', 'reporting'];   // 아직 끝나지 않은 계획
+const TASK_DONE = ['done', 'left', 'error', 'stopped'];               // 끝난 계획 조각
 
 const DEFAULT_SETTINGS = {
   lang: '',            // 'ko' | 'en' — 비어 있으면 처음 켤 때 PC 언어로 정한다
@@ -66,9 +85,15 @@ const DEFAULT_SETTINGS = {
   defaultFast: false,   // 빠른 모드(Opus 전용). 구독 요금제에 들어 있지 않고 유료 사용량 크레딧에서 돈이 나가서 기본은 끔
   defaultPermission: 'acceptEdits',
   sound: true,
+  notify: false,       // 창을 안 보고 있을 때 바탕화면 알림 (브라우저 허락이 필요해서 기본은 끔)
+  effects: true,       // 화려한 효과 (배경·색종이·빛나는 테두리)
   hoverMenu: true,
   // 감독관: 일꾼이 끝낸 일(파일을 고쳤거나 명령을 돌린 일)을 읽기 도구만으로 검토하고, 고칠 점은 그 일꾼에게 다시 시킨다
   supervisor: { enabled: true, engine: 'claude', model: 'sonnet', gptModel: '', maxRounds: 2 },   // engine 'codex' = GPT 가 검사
+  // 새 자리는 쓸 때마다 AI 사용량이 들어서 처음엔 꺼 둔다
+  lead: { enabled: false, engine: 'claude', model: 'sonnet', gptModel: '', approve: true },   // 팀장: 큰 일을 나눠 맡긴다 (approve = 계획을 먼저 보여 주고 허락받기)
+  security: { enabled: false, engine: 'claude', model: 'sonnet', gptModel: '' },             // 보안 검사관: 읽기만 하며 보안 문제를 찾는다
+  tester: { enabled: false, engine: 'claude', model: 'sonnet', gptModel: '' },               // 테스터: 명령을 실제로 돌려 본다 (Claude 는 명령마다 허락을 받는다)
   // 대체 AI: Claude 사용량이 바닥나면 claude-code-router(CCR) 게이트웨이를 거쳐 다른 AI 가 이어서 한다
   fallbackEnabled: false,
   fallbackUrl: 'http://127.0.0.1:3456',
@@ -80,9 +105,11 @@ const modelCooldown = new Map();              // 모델 이름 → 다시 써 �
 
 let settings = { ...DEFAULT_SETTINGS };
 let agents = [];
-let supervisor = null;   // 감독관 (loadState 에서 만든다)
+let staff = {};          // 관리하는 자리 (감독관·팀장·보안 검사관·테스터, loadState 에서 만든다)
+let supervisor = null;   // = staff.supervisor
 let history = [];
-let reports = [];   // 감독관 보고: 검토한 일 하나에 카드 하나. 고치게 했다가 다시 보는 동안에도 같은 카드를 이어서 고친다
+let reports = [];   // 검사 보고: 검사한 일 하나에 카드 하나. 고치게 했다가 다시 보는 동안에도 같은 카드를 이어서 고친다
+let plans = [];     // 팀장 계획: 큰 일 하나에 계획 하나 (조각마다 맡은 일꾼과 진행 상태)
 let auth ={ checked: false, checking: false, loggedIn: null, method: null };
 let claude = { path: null, version: null };
 let codex = { path: null, version: null, loggedIn: null, method: null, models: [] };   // GPT 를 돌리는 공식 Codex CLI
@@ -146,6 +173,7 @@ function makeAgent(saved = {}, log = []) {
     gptModel: typeof saved.gptModel === 'string' && GPT_MODEL.test(saved.gptModel) ? saved.gptModel : (settings.defaultGptModel || ''),
     codexThread: saved.codexThread || null,   // GPT 쪽 대화 (다음 일은 이 대화를 이어서 한다)
     lastAi: saved.lastAi || null,             // 마지막 일을 한 AI (바뀌면 인수인계 쪽지를 건넨다)
+    failedCarry: saved.failedCarry || null,   // 오류로 끝난 마지막 일의 감독관 검토 정보 (⇄ 로 넘길 때 같은 보고 카드로 잇는다)
     model: MODELS.includes(saved.model) ? saved.model : settings.defaultModel,
     effort: EFFORTS.includes(saved.effort) ? saved.effort : settings.defaultEffort,
     fast: typeof saved.fast === 'boolean' ? saved.fast : !!settings.defaultFast,
@@ -189,26 +217,40 @@ function loadState() {
     delete settings.fallbackModel;
   }
   if (!MODES.includes(settings.defaultPermission)) settings.defaultPermission = DEFAULT_SETTINGS.defaultPermission;
-  settings.supervisor = { ...DEFAULT_SETTINGS.supervisor, ...(saved.settings?.supervisor || {}) };
+  for (const k of STAFF_KEYS) settings[k] = { ...DEFAULT_SETTINGS[k], ...(saved.settings?.[k] || {}) };
   history = Array.isArray(saved.history) ? saved.history.slice(0, HISTORY_KEEP) : [];
   reports = Array.isArray(saved.reports) ? saved.reports.slice(0, REPORT_KEEP) : [];
   for (const r of reports) {   // 앱을 끄면 기다리던 검토·고치기도 사라진다
     if (REPORT_LIVE.includes(r.state)) Object.assign(r, { state: 'stopped', note: t('앱을 다시 켜서 검토가 끊겼어요') });
+  }
+  plans = Array.isArray(saved.plans) ? saved.plans.slice(0, PLAN_KEEP) : [];
+  for (const p of plans) {
+    if (!PLAN_LIVE.includes(p.state)) continue;
+    p.state = 'stopped';
+    p.note = t('앱을 다시 켜서 계획이 끊겼어요');
+    for (const x of p.tasks) if (!TASK_DONE.includes(x.state)) x.state = 'stopped';
   }
   agents = [];
   const list = Array.isArray(saved.agents) ? saved.agents.slice(0, MAX_AGENTS) : [];
   for (const s of list) agents.push(makeAgent(s, logs[s.id]));
   const want = list.length ? MIN_AGENTS : 4;   // 처음 켤 때는 4명으로 시작
   while (agents.length < want) agents.push(makeAgent());
-  // 감독관은 일꾼 수(1~8명)에 들어가지 않는 따로 된 에이전트다. 실행·기록 방식은 일꾼과 같은 코드를 쓴다.
-  supervisor = makeAgent({ ...(saved.supervisor || {}), id: 'supervisor', name: t('감독관'), color: '#FFD23F', cwd: settings.defaultCwd }, logs.supervisor);
-  supervisor.isSupervisor = true;
-  supervisor.permissionMode = 'dontAsk';
-  supervisor.fast = false;
-  supervisor.model = settings.supervisor.model;
+  // 관리하는 자리는 일꾼 수(1~8명)에 들어가지 않는 따로 된 에이전트다. 실행·기록 방식은 일꾼과 같은 코드를 쓴다.
+  staff = {};
+  for (const k of STAFF_KEYS) {
+    const kept = saved.staff?.[k] || (k === 'supervisor' ? saved.supervisor : null) || {};   // 예전 기록은 감독관만 따로 저장했다
+    const s = makeAgent({ ...kept, id: k, name: t(STAFF_NAME[k]), color: STAFF_COLOR[k], cwd: settings.defaultCwd }, logs[k]);
+    s.staff = k;
+    s.permissionMode = k === 'tester' ? 'manual' : 'dontAsk';   // 테스터만 명령을 쓰고, 그때마다 사용자에게 묻는다
+    s.fast = false;
+    s.model = settings[k].model;
+    staff[k] = s;
+  }
+  supervisor = staff.supervisor;
 }
 
-const allAgents = () => (supervisor ? [...agents, supervisor] : agents);
+const staffList = () => STAFF_KEYS.map(k => staff[k]).filter(Boolean);
+const allAgents = () => [...agents, ...staffList()];
 
 let saveTimer = null;
 function save() {
@@ -224,13 +266,14 @@ function saveNow(dir = DATA_DIR) {
       settings,
       agents: agents.map(a => ({
         id: a.id, name: a.name, color: a.color, role: a.role, cwd: a.cwd, model: a.model, effort: a.effort, fast: a.fast,
-        engine: a.engine, gptModel: a.gptModel, codexThread: a.codexThread, lastAi: a.lastAi,
+        engine: a.engine, gptModel: a.gptModel, codexThread: a.codexThread, lastAi: a.lastAi, failedCarry: a.failedCarry || undefined,
         permissionMode: a.permissionMode, sessionId: a.sessionId, last: a.last, stats: a.stats,
         mode: a.mode, autoMode: a.autoMode, fbSessionId: a.fbSessionId, fbModel: a.fbModel,
       })),
       history,
       reports,
-      supervisor: supervisor && { stats: supervisor.stats, last: supervisor.last, mode: supervisor.mode, autoMode: supervisor.autoMode, fbModel: supervisor.fbModel },
+      plans,
+      staff: Object.fromEntries(staffList().map(s => [s.staff, { stats: s.stats, last: s.last, mode: s.mode, autoMode: s.autoMode, fbModel: s.fbModel }])),
     });
     writeJson(path.join(dir, 'logs.json'), Object.fromEntries(allAgents().map(a => [a.id, a.log.slice(-LOG_SAVE)])));
     return true;
@@ -251,14 +294,15 @@ function broadcast(msg) {
 
 function pub(a) {
   return {
-    id: a.id, name: a.name, color: a.color, role: a.role, cwd: a.cwd, isSupervisor: !!a.isSupervisor,
+    id: a.id, name: a.name, color: a.color, role: a.role, cwd: a.cwd, staff: a.staff || null, isSupervisor: a.staff === 'supervisor',
     model: a.model, effort: a.effort, fast: !!a.fast, fastState: a.fastState || null, permissionMode: a.permissionMode,
     engine: a.engine, gptModel: a.gptModel, lastAi: a.lastAi,
     sessionId: a.sessionId, runtimeModel: a.runtimeModel, stats: a.stats, mode: a.mode, autoMode: a.autoMode, fbModel: a.fbModel,
     status: a.status, last: a.last, activity: a.activity, running: !!a.proc,
     current: a.current && {
       prompt: a.current.prompt, startedAt: a.current.startedAt, stopping: !!a.current.stopping,
-      reviewing: a.current.review?.workerName || null,   // 감독관이 지금 검토하는 일꾼
+      reviewing: a.current.review?.workerName || null,   // 검사하는 자리가 지금 보는 일꾼
+      phase: a.current.plan?.phase || null,              // 팀장: 'plan' 계획 세우기 / 'report' 결과 모으기
     },
     queue: a.queue.map(q => ({ id: q.id, text: q.text })),
     pending: [...a.pending.values()].map(p => ({
@@ -270,7 +314,7 @@ function pub(a) {
 function sendAgent(a) {
   scheduleSweep();
   if (a.removed) return;
-  broadcast({ type: a.isSupervisor ? 'supervisor' : 'agent', agent: pub(a) });
+  broadcast({ type: a.staff ? 'staff' : 'agent', agent: pub(a) });
 }
 
 function sendAgents() {
@@ -278,7 +322,33 @@ function sendAgents() {
   broadcast({ type: 'agents', agents: agents.map(pub) });
 }
 
-const appInfo = () => ({ url: `http://${HOST}:${PORT}/`, dataDir: DATA_DIR, dataFixed: !!DATA_ARG, defaultDataDir: DEFAULT_DATA_DIR });
+const APP_VERSION = readJson(path.join(ROOT, 'package.json'))?.version || '';
+const appInfo = () => ({ url: `http://${HOST}:${PORT}/`, version: APP_VERSION, dataDir: DATA_DIR, dataFixed: !!DATA_ARG, defaultDataDir: DEFAULT_DATA_DIR });
+
+// 문제를 알릴 때 붙이는 진단 정보. 열쇠와 시킨 일(프롬프트)·AI 가 한 말은 넣지 않고, 사용자 이름이 든 홈 폴더 경로는 ~ 로 가린다.
+function diagnostics() {
+  const tidy = v => String(v ?? '').split(os.homedir()).join('~');
+  const { fallbackKey, claudePath, defaultCwd, ...rest } = settings;
+  const recent = allAgents()
+    .flatMap(a => a.log.filter(e => e.k === 'err' || (e.k === 'done' && e.status === 'error')).map(e => ({ t: e.t, agent: a.name, text: tidy(e.text).slice(0, 400) })))
+    .sort((x, y) => y.t - x.t).slice(0, 20)
+    .map(e => ({ ...e, t: new Date(e.t).toISOString() }));
+  return {
+    app: { name: 'claude-control-room', version: APP_VERSION, lang: settings.lang },
+    node: process.version,
+    os: `${process.platform} ${os.release()} ${process.arch}`,
+    claude: { found: !!claude.path, version: claude.version, loggedIn: auth.loggedIn, method: auth.method },
+    codex: { found: !!codex.path, version: codex.version, loggedIn: codex.loggedIn, models: codex.models.length },
+    ccr: { managed: MANAGE_CCR, running: !!(ccrProc && !ccrProc.ended), ok: ccr.ok, error: ccr.error, models: ccr.models.length },
+    limit,
+    settings: { ...rest, fallbackKey: fallbackKey ? '(set)' : '', claudePath: tidy(claudePath), defaultCwd: tidy(defaultCwd) },
+    agents: allAgents().map(a => ({
+      name: a.name, engine: a.engine, model: a.model, gptModel: a.gptModel, effort: a.effort, fast: !!a.fast, permissionMode: a.permissionMode,
+      mode: a.mode, status: a.status, last: a.last, runs: a.stats.runs, queued: a.queue.length, cwd: tidy(a.cwd),
+    })),
+    recentErrors: recent,
+  };
+}
 
 function snapshot() {
   return {
@@ -286,9 +356,11 @@ function snapshot() {
     settings,
     agents: agents.map(pub),
     supervisor: pub(supervisor),
+    staff: Object.fromEntries(staffList().map(s => [s.staff, pub(s)])),
     logs: Object.fromEntries(allAgents().map(a => [a.id, a.log])),
     history,
     reports,
+    plans,
     auth,
     claude,
     codex,
@@ -530,10 +602,14 @@ function handoffNote(a, from, to, takeover) {
 }
 
 // 허락을 물을 수 없으니 권한 모드를 Codex 샌드박스로 옮긴다: 계획·모두 물어보기 → 읽기만, 나머지 → 작업 폴더 안에서만 고치기
-const codexSandbox = a => (a.isSupervisor || a.permissionMode === 'plan' || a.permissionMode === 'manual' ? 'read-only' : 'workspace-write');
+// 관리하는 자리는 읽기만 하고, 테스터만 시험을 돌리느라 작업 폴더 안에 쓸 수 있다
+const codexSandbox = a => (a.staff ? (a.staff === 'tester' ? 'workspace-write' : 'read-only')
+  : a.permissionMode === 'plan' || a.permissionMode === 'manual' ? 'read-only' : 'workspace-write');
 
 function codexArgs(a, resume) {
   const opts = ['--json', '--ignore-user-config', '--skip-git-repo-check'];
+  // 첨부한 사진: --image=경로 로 하나씩 넘긴다 (--image 는 값을 여럿 받아서, 띄어 쓰면 마지막 '-'(글은 stdin)까지 사진으로 먹는다)
+  for (const img of a.current?.images || []) if (fs.existsSync(img)) opts.push(`--image=${img}`);
   // 윈도에서는 unelevated 샌드박스를 쓴다. 설정이 없으면 작업 폴더에도 못 쓰고, elevated 는 PowerShell 이 제한 모드라
   // 한글 출력이 깨지고 명령이 C:\ 에서 시작된다. unelevated 도 작업 폴더 밖 쓰기는 막는다 (2026-10-31 직접 확인).
   if (process.platform === 'win32') opts.push('-c', 'windows.sandbox=unelevated');
@@ -566,7 +642,7 @@ function codexError(msg) {
 
 // 일 하나를 codex exec 하나로 돌린다 (글은 stdin 으로 넘긴다: 길거나 따옴표가 섞여도 안전하게)
 function startCodexTurn(a, text) {
-  const resume = !!a.codexThread && !a.isSupervisor;
+  const resume = !!a.codexThread && !a.staff;
   const [cmd, args] = command(codex.path, codexArgs(a, resume));
   const proc = spawn(cmd, args, { cwd: a.cwd, env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   proc.buf = '';
@@ -600,7 +676,7 @@ function onCodexEvent(a, proc, ev) {
   const item = ev.item && typeof ev.item === 'object' ? ev.item : {};
   switch (ev.type) {
     case 'thread.started':
-      if (!a.isSupervisor && ev.thread_id && a.codexThread !== ev.thread_id) { a.codexThread = ev.thread_id; save(); }
+      if (!a.staff && ev.thread_id && a.codexThread !== ev.thread_id) { a.codexThread = ev.thread_id; save(); }
       break;
     case 'turn.started':
       setActivity(a, t('생각하는 중'));
@@ -617,7 +693,7 @@ function onCodexEvent(a, proc, ev) {
     case 'item.completed':
       if (item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()) {
         cur.lastText = item.text;
-        const text = a.isSupervisor ? stripVerdict(item.text) : item.text.trim();
+        const text = a.staff ? stripVerdict(item.text) : item.text.trim();
         if (text) addLog(a, { k: 'text', text });
       } else if (item.type === 'command_execution') {
         const failed = item.exit_code != null && item.exit_code !== 0;
@@ -625,13 +701,13 @@ function onCodexEvent(a, proc, ev) {
         if (out) addLog(a, { k: 'out', text: out, err: failed });
         // GPT 가 파일 편집 대신 명령(Set-Content 등)으로 파일을 바꿨으면 그것도 감독관 검토 자료에 넣는다
         const c = cleanCmd(item.command);
-        if (!failed && !a.isSupervisor && WRITE_CMD.test(c)) trackWork(a, cur, { name: 'Bash', input: { command: c } });
+        if (!failed && !a.staff && WRITE_CMD.test(c)) trackWork(a, cur, { name: 'Bash', input: { command: c } });
       } else if (item.type === 'file_change' && Array.isArray(item.changes)) {
         // GPT 는 파일을 읽을 때도 명령을 쓰니, 감독관 검토 자료로는 실제로 고친 파일만 모은다
         for (const c of item.changes) {
           const name = c.kind === 'add' ? 'Write' : 'Edit';
           addLog(a, { k: 'tool', name, summary: shortPath(c.path) });
-          if (!a.isSupervisor) trackWork(a, cur, { name, input: { file_path: c.path } });
+          if (!a.staff) trackWork(a, cur, { name, input: { file_path: c.path } });
         }
         setActivity(a, t('파일 고치는 중'));
       } else if (item.type === 'web_search') {
@@ -673,7 +749,7 @@ function codexEnded(a, proc, code, err) {
     const tail = stripAnsi(proc.errTail).trim();
     if (err) endTurn(a, { status: 'error', text: t('codex 를 실행하지 못했어요: {why}', { why: err.message }) });
     else if (cur.stopping) endTurn(a, { status: 'stopped' });
-    else if (!cur.retried && a.codexThread && !a.isSupervisor && /no (?:rollout|session|conversation|thread)|not found/i.test(tail)) {
+    else if (!cur.retried && a.codexThread && !a.staff && /no (?:rollout|session|conversation|thread)|not found/i.test(tail)) {
       // 이어 하려던 GPT 대화 파일이 없어졌으면 새 대화로 한 번만 다시 시도한다
       a.codexThread = null;
       a.current = null;
@@ -714,17 +790,42 @@ const supervisorNote = gpt => [
   t('설명은 한국어로 짧게 하고, 마지막 줄에는 요청받은 형식의 JSON 한 줄로 판정을 적으세요.'),
 ].join('\n');
 
+// 자리마다 붙이는 안내문 (GPT 에게는 첫 글 앞에 붙인다)
+function staffNote(k, gpt) {
+  if (k === 'supervisor') return supervisorNote(gpt);
+  const readOnly = gpt ? t('파일을 직접 열어 확인하세요. 읽기 전용이라 파일을 고칠 수는 없습니다.')
+    : t('읽기 도구(Read, Glob, Grep)로 파일을 직접 열어 확인하세요. 파일을 고치거나 명령을 실행할 수는 없습니다.');
+  const verdictLine = t('설명은 한국어로 짧게 하고, 마지막 줄에는 요청받은 형식의 JSON 한 줄로 판정을 적으세요.');
+  if (k === 'security') {
+    return [t(`당신은 '클로드 관제실'의 보안 검사관입니다. 다른 에이전트(일꾼)가 끝낸 일에서 보안 문제만 찾습니다.`), readOnly,
+      t('실제로 위험한 것만 문제로 삼으세요. 기능이나 꾸밈, 확인하지 못한 것만으로는 fix 로 판정하지 마세요.'), verdictLine].join('\n');
+  }
+  if (k === 'tester') {
+    return [t(`당신은 '클로드 관제실'의 테스터입니다. 다른 에이전트(일꾼)가 끝낸 일이 실제로 돌아가는지 직접 실행해서 확인합니다.`),
+      gpt ? t('작업 폴더 안에서 명령을 실행할 수 있어요. 파일은 고치지 마세요.') : t('명령을 실행할 때마다 사용자에게 허락을 받아요. 꼭 필요한 명령만 쓰고, 파일은 고치지 마세요.'),
+      t('계속 켜져 있는 서버나 창은 띄우지 마세요. 확인하지 못한 것만으로는 fix 로 판정하지 말고 summary 에 적으세요.'), verdictLine].join('\n');
+  }
+  return [t(`당신은 '클로드 관제실'의 팀장입니다. 사용자의 큰 일을 일꾼들에게 나눠 맡기고, 끝나면 결과를 모아 사용자에게 보고합니다.`), readOnly,
+    t('직접 일하지 말고, 요청받은 형식으로 답하세요. 설명은 한국어로 짧게 하세요.')].join('\n');
+}
+
 function write(proc, obj) {
   if (proc && !proc.ended && proc.stdin.writable) proc.stdin.write(JSON.stringify(obj) + '\n');
 }
 
 function startProc(a) {
   // --permission-prompt-tool stdio 가 있어야 허락이 필요한 일을 claude 가 혼자 거절하지 않고 이 서버(화면)에 물어본다
-  // 감독관은 읽기 도구 3개만 갖고, 그 밖의 일은 묻지 않고 거절된다 (dontAsk) — 일꾼의 파일을 건드릴 수 없다
-  const args = a.isSupervisor ? [
+  // 관리하는 자리는 읽기 도구 3개만 갖고, 그 밖의 일은 묻지 않고 거절된다 (dontAsk) — 일꾼의 파일을 건드릴 수 없다.
+  // 테스터만 명령 도구를 더 갖고, 명령마다 사용자에게 묻는다 (manual + stdio)
+  const tester = a.staff === 'tester';
+  const args = a.staff ? [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-    '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
-    '--name', t('관제실 · {name}', { name: a.name }), '--append-system-prompt', supervisorNote(false),
+    ...(tester ? ['--permission-mode', 'manual', '--permission-prompt-tool', 'stdio'] : ['--permission-mode', 'dontAsk']),
+    '--tools', tester ? `Read,Glob,Grep,Bash${process.platform === 'win32' ? ',PowerShell' : ''}` : 'Read,Glob,Grep',
+    // --tools 로 도구를 줄이면 MCP 도구를 필요할 때만 불러오는 기능(ToolSearch)도 빠져서, PC 에 깔린 MCP 도구 설명이 통째로 대화에 실린다
+    // (2026-11-19 진짜 Sonnet 으로 재 보니 검토 한 번에 60만 토큰 → 이 두 옵션을 붙이면 2만 7천 토큰). 관리하는 자리는 MCP 도구·스킬이 필요 없다
+    '--strict-mcp-config', '--disable-slash-commands',
+    '--name', t('관제실 · {name}', { name: a.name }), '--append-system-prompt', staffNote(a.staff, false),
   ] : [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--permission-mode', a.permissionMode, '--permission-prompt-tool', 'stdio',
@@ -743,7 +844,7 @@ function startProc(a) {
   } else {
     if (a.model) args.push('--model', a.model);
     if (a.effort) args.push('--effort', a.effort);
-    if (a.fast && !a.isSupervisor) args.push('--settings', JSON.stringify({ fastMode: true }));   // -p 에서는 이렇게만 빠른 모드를 켤 수 있다
+    if (a.fast && !a.staff) args.push('--settings', JSON.stringify({ fastMode: true }));   // -p 에서는 이렇게만 빠른 모드를 켤 수 있다
     if (a.sessionId) args.push('--resume', a.sessionId);
   }
   a.fastState = null;
@@ -891,14 +992,14 @@ function onEvent(a, proc, ev) {
       const synthetic = ev.message?.model === '<synthetic>';   // claude 가 만든 오류 안내 — 같은 글이 결과로도 오니 한 번만 보여 준다
       for (const b of ev.message?.content || []) {
         if (b.type === 'text' && b.text?.trim() && !sub && !synthetic) {
-          const text = a.isSupervisor ? stripVerdict(b.text) : b.text.trim();   // 감독관의 판정 JSON 줄은 보고 카드로 따로 보여 준다
+          const text = a.staff ? stripVerdict(b.text) : b.text.trim();   // 감독관의 판정 JSON 줄은 보고 카드로 따로 보여 준다
           if (text) addLog(a, { k: 'text', text });
         } else if (b.type === 'tool_use') {
           const summary = summarizeTool(b.name, b.input);
           a.tools.set(b.id, b.name);
           addLog(a, { k: 'tool', name: b.name, summary: summary.slice(0, 1500), sub });
           if (!sub) setActivity(a, `${toolKo(b.name)} ${firstLine(summary).slice(0, 60)}`.trim());
-          if (cur && !a.isSupervisor) trackWork(a, cur, b);
+          if (cur && !a.staff) trackWork(a, cur, b);
         }
       }
       break;
@@ -1018,7 +1119,7 @@ function endTurn(a, { status, text = '', ev = null }) {
   a.stats.tokensIn += tokens.in;
   a.stats.tokensOut += tokens.out;
   addLog(a, { k: 'done', status, ms, tokens, text: status === 'error' ? String(text).slice(0, 1200) : '' });
-  if (!a.isSupervisor) {   // 감독관의 검토는 기록 창에 따로 남기지 않고, 검토받은 일의 기록에 판정을 붙인다
+  if (!a.staff) {   // 감독관의 검토는 기록 창에 따로 남기지 않고, 검토받은 일의 기록에 판정을 붙인다
     const item = {
       id: newId(), agentId: a.id, agentName: a.name, color: a.color, prompt: cur.prompt,
       result: String(text || '').slice(0, 40000), status, at: cur.startedAt, ms, tokens, turns: ev?.num_turns ?? null,
@@ -1048,9 +1149,20 @@ function endTurn(a, { status, text = '', ev = null }) {
   }, IDLE_CLOSE_MS);
   setStatus(a, 'idle');
   save();
-  if (a.isSupervisor) { if (cur.review) finishReview(cur.review, status, text); }
-  else if (status === 'done') requestReview(a, cur, text);
-  else if (cur.reportId && !cur.handover) markReport(cur.reportId, { state: 'stopped', note: status === 'stopped' ? t('일꾼을 멈춰서 고치기를 그만뒀어요') : t('일꾼이 고치다가 오류가 났어요') });   // 다른 AI 에게 넘긴 일은 보고 카드를 그대로 이어 간다
+  if (a.staff) {
+    if (cur.review) finishReview(a, cur.review, status, text);
+    else if (cur.plan) finishLead(cur.plan, status, text);
+    return;
+  }
+  const pt = cur.planTask;
+  if (pt) planTaskPatch(pt, { result: String(text || '').slice(0, 3000) });
+  if (status === 'done') {
+    const reviewing = requestReview(a, cur, text);
+    if (pt) { if (reviewing) planTaskPatch(pt, { state: 'reviewing' }); else planTaskEnd(pt, 'done'); }
+  } else if (!cur.handover) {   // 다른 AI 에게 넘긴 일은 보고 카드·계획 조각을 그대로 이어 간다
+    if (cur.reportId) markReport(cur.reportId, { state: 'stopped', note: status === 'stopped' ? t('일꾼을 멈춰서 고치기를 그만뒀어요') : t('일꾼이 고치다가 오류가 났어요') });
+    if (pt) planTaskEnd(pt, status === 'stopped' ? 'stopped' : 'error');
+  }
 }
 
 function failTurn(a, proc, code) {
@@ -1104,12 +1216,13 @@ function procEnded(a, proc, code, err) {
 function pump(a) {
   if (a.current || a.removed || !a.queue.length) return;
   if (a.proc?.mode === 'codex') return;   // 지난 GPT 일의 프로세스가 아직 끝나는 중 (끝나면 codexEnded 가 다시 부른다)
-  // 감독관은 검토할 때마다 그 일꾼의 폴더에서 새 대화로 시작한다 (검토끼리 섞이지 않게, 일꾼의 파일을 읽을 수 있게)
-  if (a.isSupervisor && a.queue[0].review) {
-    a.cwd = a.queue[0].review.cwd;
-    a.engine = settings.supervisor.engine === 'codex' ? 'codex' : 'claude';
-    a.model = settings.supervisor.model;
-    a.gptModel = settings.supervisor.gptModel || '';
+  // 관리하는 자리는 일마다 새 대화로 시작한다 (일끼리 섞이지 않게). 검사는 그 일꾼의 폴더에서, 팀장은 기본 작업 폴더에서 한다
+  if (a.staff && (a.queue[0].review || a.queue[0].plan)) {
+    const cfg = settings[a.staff];
+    a.cwd = a.queue[0].review ? a.queue[0].review.cwd : settings.defaultCwd;
+    a.engine = cfg.engine === 'codex' ? 'codex' : 'claude';
+    a.model = cfg.model;
+    a.gptModel = cfg.gptModel || '';
     a.sessionId = null;
     a.fbSessionId = null;
     if (a.proc) closeProc(a);
@@ -1159,29 +1272,38 @@ function pump(a) {
   const item = a.queue.shift();
   a.current = {
     prompt: item.text, startedAt: Date.now(), proc: useCodex ? null : a.proc, retried: !!item.retried, tried: item.tried,
-    review: item.review,                 // 감독관: 지금 검토하는 일
+    review: item.review,                 // 검사하는 자리: 지금 검사하는 일
+    plan: item.plan,                     // 팀장: 지금 다루는 계획과 단계
+    planTask: item.planTask,             // 일꾼: 팀장이 나눈 일이면 그 계획 조각
     round: item.round || 0,              // 일꾼: 감독관이 몇 번째로 고치게 한 일인지
     task: item.task || item.text,        // 일꾼: 처음 시킨 일 (고치기를 여러 번 해도 그대로)
     reportId: item.reportId,             // 일꾼: 감독관이 고치라고 한 일이면 그 보고 카드
     files: item.files ? new Set(item.files) : undefined,   // 넘겨받은 일이면 앞 AI 가 고친 파일부터
     commands: item.commands ? [...item.commands] : undefined,
+    images: item.images,                 // GPT 에게 같이 넘길 사진 (첨부)
   };
-  if (item.review?.reportId) markReport(item.review.reportId, { state: 'reviewing' });
+  if (item.review?.reportId) markReport(item.review.reportId, { state: 'reviewing', stage: a.staff });
+  if (item.planTask) planTaskPatch(item.planTask, { state: item.round ? 'fixing' : 'working' });
   // 인수인계 쪽지: 지난 일과 다른 AI(Claude ↔ 대체 AI ↔ GPT)가 맡으면, 새 AI 에게 지난 일을 먼저 알려 준다
   const ai = aiOf(a, useCodex);
-  const fresh = !a.isSupervisor && a.lastAi && a.lastAi !== ai ? handoffNote(a, a.lastAi, ai, item.takeover) : '';
+  const fresh = !a.staff && a.lastAi && a.lastAi !== ai ? handoffNote(a, a.lastAi, ai, item.takeover) : '';
   const note = fresh || item.note || '';   // 같은 AI 가 같은 일을 새 대화로 다시 하면 처음 건넨 쪽지를 다시 건넨다
   a.current.note = note;
   if (!item.quiet) addLog(a, { k: 'user', text: item.text });
   if (fresh) addLog(a, { k: 'sys', text: t('인수인계 쪽지를 건넸어요 ({from} → {to})', { from: aiKo(a.lastAi), to: aiKo(ai) }) });
   else if (note) addLog(a, { k: 'sys', text: t('새 대화로 다시 해서 인수인계 쪽지를 다시 건넸어요') });
-  if (!a.isSupervisor && a.lastAi !== ai) { a.lastAi = ai; save(); }
+  if (!a.staff && a.lastAi !== ai) { a.lastAi = ai; save(); }
   let text = note + item.text;
   if (useCodex) {
     // Codex 에는 붙일 시스템 안내 칸이 없어서, 새 대화의 첫 글 앞에 같은 안내를 붙인다
     // 어느 폴더에서 일하는지 전체 경로로 알려 준다 (그 밖에는 샌드박스가 쓰기를 막는다)
-    const where = t('작업 폴더: {dir} (파일은 이 폴더 안에서만 만들고 고칠 수 있어요)', { dir: a.cwd });
-    if (a.isSupervisor) text = `${supervisorNote(true)}\n${where}\n\n${text}`;
+    let where = t('작업 폴더: {dir} (파일은 이 폴더 안에서만 만들고 고칠 수 있어요)', { dir: a.cwd });
+    // 윈도의 읽기 전용 샌드박스에서는 PowerShell 이 제한 모드라 Get-Content 출력의 한글이 깨진다 (파일은 멀쩡하다).
+    // cmd /c type 이나 node 로 읽으면 바이트가 그대로 나온다 (2026-11-20 진짜 Codex 로 확인). 모르면 멀쩡한 파일을 '깨졌다'며 고치게 한다
+    if (process.platform === 'win32' && codexSandbox(a) === 'read-only') {
+      where += `\n${t('이 PC의 읽기 전용 환경에서는 PowerShell 의 Get-Content 출력에서 한글이 깨져 보여요. 파일 내용은 cmd /c type 파일이름 으로 읽으세요. 그래도 한글이 깨져 보이면 파일이 아니라 출력 문제이니, 그것만으로 파일을 고치게 하지 마세요.')}`;
+    }
+    if (a.staff) text = `${staffNote(a.staff, true)}\n${where}\n\n${text}`;
     else if (!a.codexThread) text = `${t('[관제실 안내]')}\n${systemNote(a)}\n${where}\n\n${text}`;
     else if (a.langNote) text = `${t('[관제실 안내]')}\n${t(LANG_NOTE)}\n\n${text}`;   // 언어를 바꾼 뒤 이어 하는 GPT 대화에는 새 언어를 알려 준다
     a.langNote = false;
@@ -1247,9 +1369,10 @@ function handOver(a, proc) {
 
 // 같은 일을 다시 맡길 때(한도·모델 바꿈·대화 잃음) 감독관 검토 정보도 그대로 넘긴다
 const carry = cur => ({
-  round: cur.round, task: cur.task, review: cur.review, reportId: cur.reportId,
+  round: cur.round, task: cur.task, review: cur.review, reportId: cur.reportId, plan: cur.plan, planTask: cur.planTask,
   files: cur.files ? [...cur.files] : undefined, commands: cur.commands ? [...cur.commands] : undefined,   // 앞 AI 가 이미 고친 것도 감독관이 보게
   note: cur.note,   // 이어 할 대화를 잃거나 대체 AI 모델이 바뀌어 새 대화로 다시 해도 인수인계 쪽지를 잃지 않게
+  images: cur.images,   // 첨부한 사진도 같이 다시 넘긴다
 });
 
 // 순서 목록에서 15분 안에 실패한 적 없는 첫 모델 (목록이 비어 있으면 null = CCR 기본 모델)
@@ -1379,7 +1502,7 @@ async function checkCcr() {
 // 이미 다른 방법(ccr ui/start)으로 켜진 CCR 이 있으면 그건 끄고 바꿔 띄운다 — 그쪽은 빈 창을 띄우기 때문이다.
 async function ensureCcr() {
   if (!settings.fallbackEnabled) return;
-  if (process.platform === 'win32' && !(ccrProc && !ccrProc.ended)) await startCcr();
+  if (MANAGE_CCR && process.platform === 'win32' && !(ccrProc && !ccrProc.ended)) await startCcr();
   await checkCcr();
 }
 
@@ -1407,7 +1530,7 @@ function importCcrKey() {
 }
 
 async function openCcrUi() {
-  if (process.platform !== 'win32') return t('터미널에서 ccr ui 를 실행해 주세요.');
+  if (process.platform !== 'win32' || !MANAGE_CCR) return t('터미널에서 ccr ui 를 실행해 주세요.');
   if (!ccrCli()) return t('claude-code-router 가 설치돼 있지 않아요. (npm install -g @musistudio/claude-code-router)');
   if (!(ccrProc && !ccrProc.ended)) await startCcr();
   for (let i = 0; i < 20 && !ccrUiUrl; i++) await sleep(300);
@@ -1467,6 +1590,8 @@ function markReport(id, patch) {
   Object.assign(r, patch, { updatedAt: Date.now() });
   broadcast({ type: 'report', report: r });
   save();
+  // 팀장이 나눈 일이면 검사가 끝난 때가 그 조각이 끝난 때다
+  if (r.planTask && REPORT_DONE.includes(r.state)) planTaskEnd(r.planTask, { pass: 'done', left: 'left' }[r.state] || 'stopped', r.work || r.summary || r.note || '');
   return r;
 }
 
@@ -1484,12 +1609,29 @@ function scheduleSweep() {
       if (allAgents().some(a => holds(a.current, r.id) || a.queue.some(q => holds(q, r.id)))) continue;
       markReport(r.id, { state: 'stopped', note: r.state === 'fixing' ? t('일꾼이 고치던 일이 멈췄어요') : t('검토가 중간에 멈췄어요') });
     }
+    // 계획도 같다: 하던 조각을 아무도 들고 있지 않거나(대기열을 비움·일꾼을 지움), 팀장 차례인데 팀장이 들고 있지 않으면 멈춘 것으로 닫는다
+    const holdsTask = (item, id) => !!item && (item.planTask?.taskId === id || item.review?.planTask?.taskId === id);
+    const holdsPlan = (item, id) => !!item && item.plan?.planId === id;
+    for (const p of plans) {
+      if (p.state === 'planning' || p.state === 'reporting') {
+        const lead = staff.lead;
+        if (!holdsPlan(lead.current, p.id) && !lead.queue.some(q => holdsPlan(q, p.id))) markPlan(p.id, { state: 'stopped', note: t('팀장이 하던 일이 멈췄어요') });
+        continue;
+      }
+      if (p.state !== 'running') continue;
+      for (const x of p.tasks) {
+        if (TASK_DONE.includes(x.state) || x.state === 'blocked') continue;   // 앞 조각을 기다리는 조각은 아직 아무도 들고 있지 않다
+        const held = allAgents().some(a => holdsTask(a.current, x.id) || a.queue.some(q => holdsTask(q, x.id)))
+          || reports.some(r => REPORT_LIVE.includes(r.state) && r.planTask?.taskId === x.id);
+        if (!held) planTaskEnd({ planId: p.id, taskId: x.id }, 'stopped');
+      }
+    }
   });
 }
 
-// 감독관 답에서 판정 JSON 줄을 뺀 설명만 남긴다 (```json 으로 감싼 경우도)
+// 검사 자리·팀장 답에서 판정·계획 JSON 줄을 뺀 설명만 남긴다 (```json 으로 감싼 경우도)
 function stripVerdict(text) {
-  return String(text || '').split('\n').filter(l => !/^\s*\{.*"verdict"/.test(l)).join('\n')
+  return String(text || '').split('\n').filter(l => !/^\s*\{.*"(?:verdict|tasks)"/.test(l)).join('\n')
     .replace(/```[a-z]*\s*```/gi, '').trim();
 }
 
@@ -1499,51 +1641,90 @@ function relFile(cwd, file) {
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.replace(/\\/g, '/') : shortPath(file);
 }
 
-// 일꾼이 일을 끝내면 감독관에게 검토를 맡긴다. 파일도 안 고치고 명령도 안 돌린 일(질문·답)은 건너뛴다.
+// ── 검사 팀: 일꾼이 끝낸 일을 감독관 → 보안 검사관 → 테스터 차례로 검사한다 (켜진 자리만) ──
+
+const staffName = k => t(STAFF_NAME[k] || k);
+const stageOn = k => !!settings[k]?.enabled && !!staff[k];
+// after 다음 차례의 켜진 검사 자리 (after 가 없으면 첫 자리). 없으면 null
+const nextStage = after => REVIEW_STAGES.slice(after ? REVIEW_STAGES.indexOf(after) + 1 : 0).find(stageOn) || null;
+
+// 일꾼이 일을 끝내면 첫 검사 자리에 맡긴다. 파일도 안 고치고 명령도 안 돌린 일(질문·답)은 건너뛴다. 맡겼으면 true
 function requestReview(a, cur, text) {
   const files = [...(cur.files || [])];
   const commands = cur.commands || [];
   let r = cur.reportId && reports.find(x => x.id === cur.reportId);
-  if (!settings.supervisor.enabled || !supervisor) {
-    if (r) markReport(r.id, { state: 'stopped', note: t('감독관을 꺼서 고친 뒤 다시 보지 않았어요') });
-    return;
+  const stage = nextStage(null);
+  if (!stage) {
+    if (r) markReport(r.id, { state: 'stopped', note: t('검사하는 자리를 모두 꺼서 고친 뒤 다시 보지 않았어요') });
+    return false;
   }
-  if (!files.length && !commands.length && !r) return;   // 감독관이 고치라고 한 일은 바뀐 게 없어도 다시 본다
+  if (!files.length && !commands.length && !r) return false;   // 검사 자리가 고치라고 한 일은 바뀐 게 없어도 다시 본다
   const round = cur.round || 0;
   if (!r) {
     r = { id: newId(), workerId: a.id, workerName: a.name, color: a.color, task: String(cur.task || '').slice(0, 300),
-      work: '', summary: '', fix: '', note: '', files: [], steps: [], at: Date.now() };
+      work: '', summary: '', fix: '', note: '', files: [], steps: [], at: Date.now(), planTask: cur.planTask || null };
     reports.unshift(r);
     if (reports.length > REPORT_KEEP) reports.length = REPORT_KEEP;
   }
   markReport(r.id, {
-    state: 'queued', round, max: settings.supervisor.maxRounds, note: '',
+    state: 'queued', stage, round, max: settings.supervisor.maxRounds, note: '',
     files: [...new Set([...r.files, ...files.map(f => relFile(a.cwd, f))])].slice(0, 12),
   });
+  const review = {
+    workerId: a.id, workerName: a.name, cwd: a.cwd, round, task: cur.task, prompt: cur.prompt, historyId: cur.historyId, reportId: r.id,
+    files, commands, text: String(text || '').slice(0, 4000), planTask: cur.planTask || null,
+  };
+  queueReview(stage, review);
+  addLog(a, { k: 'sys', text: t('{name}에게 검사를 맡겼어요', { name: staffName(stage) }) + (round ? ` ${t('({n}번째 수정 뒤)', { n: round })}` : '') });
+  return true;
+}
+
+function queueReview(stage, review) {
+  const s = staff[stage];
+  s.queue.push({ id: newId(), text: reviewPrompt(stage, review), quiet: true, review: { ...review, stage } });
+  const after = review.round ? ` ${t('({n}번째 수정 뒤)', { n: review.round })}` : '';
+  addLog(s, { k: 'user', text: `${t('{name} 검토', { name: review.workerName })}${after} — ${firstLine(review.task).slice(0, 80)}` });
+  sendAgent(s);
+  pump(s);
+}
+
+// 검사 자리에 보내는 글: 일꾼이 한 일(공통) + 자리마다 볼 것 + 판정 JSON 형식
+function reviewPrompt(stage, rv) {
   const none = t('- (없음)');
-  const prompt = [
-    t('[검토 요청] 일꾼 "{name}"{ga} 일을 끝냈어요. 지금 폴더가 그 일꾼의 작업 폴더예요.', { name: a.name, ga: josa(a.name, '이', '가') }),
-    '', t('## 사용자가 시킨 일'), cur.task,
-    ...(round ? ['', t('## 이번은 감독관이 고치게 한 {n}번째 수정이에요. 이번에 시킨 내용', { n: round }), cur.prompt] : []),
-    '', t('## 일꾼이 만들거나 고친 파일'), ...(files.length ? files.map(f => `- ${f}`) : [none]),
-    '', t('## 일꾼이 실행한 명령'), ...(commands.length ? commands.map(c => `- ${c}`) : [none]),
-    '', t('## 일꾼의 마지막 보고'), String(text || t('(없음)')).slice(0, 4000),
-    '', t('위 파일을 직접 읽어서 시킨 일을 제대로 했는지, 버그·빠뜨린 것·위험한 점이 있는지 확인하세요.'),
+  const ga = josa(rv.workerName, '이', '가');
+  const head = {
+    supervisor: t('[검토 요청] 일꾼 "{name}"{ga} 일을 끝냈어요. 지금 폴더가 그 일꾼의 작업 폴더예요.', { name: rv.workerName, ga }),
+    security: t('[보안 검사 요청] 일꾼 "{name}"{ga} 일을 끝냈어요. 지금 폴더가 그 일꾼의 작업 폴더예요.', { name: rv.workerName, ga }),
+    tester: t('[시험 요청] 일꾼 "{name}"{ga} 일을 끝냈어요. 지금 폴더가 그 일꾼의 작업 폴더예요.', { name: rv.workerName, ga }),
+  }[stage];
+  const ask = {
+    supervisor: [t('위 파일을 직접 읽어서 시킨 일을 제대로 했는지, 버그·빠뜨린 것·위험한 점이 있는지 확인하세요.')],
+    security: [
+      t('위 파일을 직접 읽어서 보안 문제만 찾으세요: 코드에 적힌 열쇠·비밀번호·토큰, 사용자 몰래 바깥으로 보내는 정보, 위험한 명령(지우기·시스템 설정 바꾸기), 검사 없이 실행하거나 화면에 넣는 입력(eval, innerHTML, 이어 붙인 SQL 문장).'),
+      t('기능이나 꾸밈은 보지 마세요. 실제로 위험한 것만 fix 로 판정하세요.'),
+    ],
+    tester: [
+      t('이 일이 실제로 돌아가는지 직접 실행해서 확인하세요. 시험(test)이 있으면 돌리고, 없으면 문법 검사나 짧게 실행해 보는 정도로 확인하세요.'),
+      t('파일은 고치지 마세요. 실행해 보니 깨지는 것만 fix 로 판정하세요.'),
+    ],
+  }[stage];
+  return [
+    head,
+    '', t('## 사용자가 시킨 일'), rv.task,
+    ...(rv.round ? ['', t('## 이번은 검사하는 자리가 고치게 한 {n}번째 수정이에요. 이번에 시킨 내용', { n: rv.round }), rv.prompt] : []),
+    '', t('## 일꾼이 만들거나 고친 파일'), ...(rv.files.length ? rv.files.map(f => `- ${f}`) : [none]),
+    '', t('## 일꾼이 실행한 명령'), ...(rv.commands.length ? rv.commands.map(c => `- ${c}`) : [none]),
+    '', t('## 일꾼의 마지막 보고'), rv.text || t('(없음)'),
+    '', ...ask,
     t('짧게 설명한 뒤 마지막 줄에 아래 형식의 JSON 한 줄만 적으세요.'),
     t('{"verdict":"pass","work":"일꾼이 한 일","summary":"판정 한 문장","fix":""}'),
     t('work 에는 일꾼이 실제로 만들거나 고친 것과 그 결과를 사용자에게 보고하듯 1~2문장으로 적으세요. 관제실 보고판에 그대로 올라가요.'),
     t('summary 에는 판정 이유를 한 문장으로 적으세요.'),
     t('고칠 게 있으면 verdict 를 "fix" 로 하고, fix 에 일꾼에게 그대로 전할 구체적인 수정 지시를 적으세요.'),
   ].join('\n');
-  supervisor.queue.push({ id: newId(), text: prompt, quiet: true, review: { workerId: a.id, workerName: a.name, cwd: a.cwd, round, task: cur.task, historyId: cur.historyId, reportId: r.id } });
-  const after = round ? ` ${t('({n}번째 수정 뒤)', { n: round })}` : '';
-  addLog(a, { k: 'sys', text: t('감독관에게 검토를 맡겼어요') + after });
-  addLog(supervisor, { k: 'user', text: `${t('{name} 검토', { name: a.name })}${after} — ${firstLine(cur.task).slice(0, 80)}` });
-  sendAgent(supervisor);
-  pump(supervisor);
 }
 
-// 감독관 답의 마지막 JSON 한 줄에서 판정을 읽는다
+// 검사 자리 답의 마지막 JSON 한 줄에서 판정을 읽는다
 function parseVerdict(text) {
   const lines = String(text || '').split('\n').filter(l => l.includes('"verdict"')).reverse();
   for (const line of lines) {
@@ -1563,62 +1744,283 @@ function parseVerdict(text) {
   return null;
 }
 
-function finishReview(review, status, text) {
+function finishReview(s, review, status, text) {
   const worker = agents.find(x => x.id === review.workerId);
   const rid = review.reportId;
+  const who = s.name;
   if (!worker) {
     if (rid) markReport(rid, { state: 'stopped', note: t('검토하는 동안 일꾼이 지워졌어요') });
     return;
   }
   if (status !== 'done') {
-    addLog(worker, { k: 'sys', text: t('감독관 검토가 끝나지 못했어요 ({status})', { status: statusKo(status) }) });
-    if (rid) markReport(rid, { state: 'stopped', note: status === 'stopped' ? t('감독관 검토를 멈췄어요') : t('감독관이 검토하다가 오류가 났어요') });
+    addLog(worker, { k: 'sys', text: t('{name} 검사가 끝나지 못했어요 ({status})', { name: who, status: statusKo(status) }) });
+    if (rid) markReport(rid, { state: 'stopped', note: status === 'stopped' ? t('{name} 검사를 멈췄어요', { name: who }) : t('{name}{ga} 검사하다가 오류가 났어요', { name: who, ga: josa(who, '이', '가') }) });
     return;
   }
   const v = parseVerdict(text);
   if (!v) {
-    addLog(worker, { k: 'sys', text: t('감독관의 판정을 읽지 못했어요 — 감독관 칸에서 내용을 확인해 주세요') });
-    if (rid) markReport(rid, { state: 'stopped', note: t('감독관의 판정을 읽지 못했어요 — 감독관 칸의 검토 과정을 확인해 주세요') });
+    addLog(worker, { k: 'sys', text: t('{name}의 판정을 읽지 못했어요 — {name} 칸에서 내용을 확인해 주세요', { name: who }) });
+    if (rid) markReport(rid, { state: 'stopped', note: t('{name}의 판정을 읽지 못했어요 — {name} 칸에서 내용을 확인해 주세요', { name: who }) });
     return;
   }
   const h = history.find(x => x.id === review.historyId);
   if (h) {
-    h.review = { verdict: v.verdict, work: v.work, summary: v.summary, round: review.round };
+    h.review = { verdict: v.verdict, work: v.work || h.review?.work || '', summary: v.summary, round: review.round, stage: review.stage };
     broadcast({ type: 'history-update', item: h });
     save();
   }
-  // 보고 카드: 한 일(work)은 가장 최근 검토 것으로, 판정은 차례(steps)로 쌓는다
+  // 보고 카드: 한 일(work)은 가장 최근에 받은 것으로, 판정은 차례(steps)로 쌓는다
   const r = rid && reports.find(x => x.id === rid);
   const report = patch => {
     if (!r) return;
-    const steps = [...(r.steps || []), { round: review.round, verdict: v.verdict, summary: v.summary }].slice(-6);
+    const steps = [...(r.steps || []), { stage: review.stage, round: review.round, verdict: v.verdict, summary: v.summary }].slice(-10);
     markReport(rid, { work: v.work || r.work, summary: v.summary, fix: v.fix, steps, note: '', ...patch });
   };
-  console.log(`[${clock()}] ${t('감독관')}: ${worker.name} ${v.verdict === 'pass' ? t('통과') : t('수정 요청')} — ${v.summary.slice(0, 60)}`);
+  console.log(`[${clock()}] ${who}: ${worker.name} ${v.verdict === 'pass' ? t('통과') : t('수정 요청')} — ${v.summary.slice(0, 60)}`);
   if (v.verdict === 'pass') {
-    addLog(worker, { k: 'sys', text: t('✓ 감독관 검토 통과 — {summary}', { summary: v.summary }) });
-    addLog(supervisor, { k: 'sys', text: t('판정: {name} 통과 — {summary}', { name: worker.name, summary: v.summary }) });
-    report({ state: 'pass' });
+    addLog(worker, { k: 'sys', text: t('✓ {name} 통과 — {summary}', { name: who, summary: v.summary }) });
+    addLog(s, { k: 'sys', text: t('판정: {name} 통과 — {summary}', { name: worker.name, summary: v.summary }) });
+    const next = nextStage(review.stage);
+    if (next) {
+      report({ state: 'queued', stage: next });
+      queueReview(next, review);
+      addLog(worker, { k: 'sys', text: t('{name}에게 검사를 맡겼어요', { name: staffName(next) }) });
+    } else report({ state: 'pass' });
     return;
   }
   const max = settings.supervisor.maxRounds;
   if (review.round >= max) {
-    addLog(worker, { k: 'sys', text: t('⚠ 감독관이 {max}번 고치게 했는데도 문제가 남았어요 — 직접 확인해 주세요\n{summary}', { max, summary: v.summary }) });
-    addLog(supervisor, { k: 'sys', text: t('판정: {name}의 일에 고칠 점이 남았어요 ({max}번 고치게 함) — {summary}', { name: worker.name, max, summary: v.summary }) });
-    broadcast({ type: 'notice', level: 'warn', text: t('{name}의 일에 아직 문제가 남아 있어요. 감독관 칸과 기록을 확인해 주세요.', { name: worker.name }) });
+    addLog(worker, { k: 'sys', text: t('⚠ 검사하는 자리가 {max}번 고치게 했는데도 문제가 남았어요 — 직접 확인해 주세요\n{summary}', { max, summary: v.summary }) });
+    addLog(s, { k: 'sys', text: t('판정: {name}의 일에 고칠 점이 남았어요 ({max}번 고치게 함) — {summary}', { name: worker.name, max, summary: v.summary }) });
+    broadcast({ type: 'notice', level: 'warn', text: t('{name}의 일에 아직 문제가 남아 있어요. 검사 보고와 기록을 확인해 주세요.', { name: worker.name }) });
     report({ state: 'left', note: t('{max}번 고치게 했는데도 문제가 남았어요. 직접 확인해 주세요.', { max }) });
     return;
   }
-  addLog(worker, { k: 'sys', text: t('감독관이 고칠 점을 찾았어요 — {summary}', { summary: v.summary }) });
-  addLog(supervisor, { k: 'sys', text: t('판정: {name}에게 다시 고치게 해요 ({n}/{max}) — {summary}', { name: worker.name, n: review.round + 1, max, summary: v.summary }) });
+  addLog(worker, { k: 'sys', text: t('{name}{ga} 고칠 점을 찾았어요 — {summary}', { name: who, ga: josa(who, '이', '가'), summary: v.summary }) });
+  addLog(s, { k: 'sys', text: t('판정: {name}에게 다시 고치게 해요 ({n}/{max}) — {summary}', { name: worker.name, n: review.round + 1, max, summary: v.summary }) });
   report({ state: 'fixing', round: review.round + 1, max });
-  worker.queue.push({ id: newId(), text: `${t('[감독관 수정 요청 {n}/{max}]', { n: review.round + 1, max })} ${v.fix || v.summary}`, round: review.round + 1, task: review.task, reportId: rid });
+  worker.queue.push({
+    id: newId(), text: `${t('[{name} 수정 요청 {n}/{max}]', { name: who, n: review.round + 1, max })} ${v.fix || v.summary}`,
+    round: review.round + 1, task: review.task, reportId: rid, planTask: review.planTask || undefined,
+  });
   sendAgent(worker);
   pump(worker);
 }
 
-function enqueue(a, text) {
-  a.queue.push({ id: newId(), text });
+// ── 팀장: 큰 일을 받아 계획을 세우고(허락받고) 일꾼들에게 나눠 맡긴 뒤, 다 끝나면 결과를 모아 보고한다 ──
+
+function markPlan(id, patch) {
+  const p = plans.find(x => x.id === id);
+  if (!p) return null;   // 그사이 기록을 지웠으면 그냥 둔다
+  Object.assign(p, patch, { updatedAt: Date.now() });
+  broadcast({ type: 'plan', plan: p });
+  save();
+  return p;
+}
+
+function apiLead(text, files = []) {
+  if (!stageOn('lead')) return fail(400, t('팀장이 꺼져 있어요. 에이전트 관리 창에서 먼저 켜 주세요.'));
+  // 첨부는 팀장이 읽는 기본 작업 폴더와 일꾼들의 작업 폴더마다 같은 자리(attachments/)에 넣는다 (어느 일꾼이 맡을지 아직 모른다)
+  let note = '';
+  for (const dir of [...new Set([settings.defaultCwd, ...agents.map(a => a.cwd)])].filter(isDir)) {
+    const got = copyAttachments(files, dir);
+    if (!note) note = attachNote(got);
+  }
+  const p = { id: newId(), request: (text + note).slice(0, 8000), state: 'planning', plan: '', tasks: [], final: '', note: '', at: Date.now() };
+  plans.unshift(p);
+  if (plans.length > PLAN_KEEP) plans.length = PLAN_KEEP;
+  markPlan(p.id, {});
+  queueLead(p, 'plan');
+  return [200, { ok: true, sentTo: ['lead'], planId: p.id }];
+}
+
+function queueLead(p, phase) {
+  const lead = staff.lead;
+  lead.queue.push({ id: newId(), text: leadPrompt(p, phase), quiet: true, plan: { planId: p.id, phase } });
+  addLog(lead, { k: 'user', text: `${phase === 'plan' ? t('계획 세우기') : t('결과 모으기')} — ${firstLine(p.request).slice(0, 80)}` });
+  sendAgent(lead);
+  pump(lead);
+}
+
+const TASK_KO = { done: '끝남', left: '문제 남음', error: '오류', stopped: '중단' };
+
+function leadPrompt(p, phase) {
+  if (phase === 'plan') {
+    return [
+      t('[계획 요청] 사용자가 큰 일을 맡겼어요. 일꾼들에게 나눠 맡길 계획을 세워 주세요.'),
+      '', t('## 사용자가 시킨 일'), p.request,
+      '', t('## 일꾼 (이름 · 역할 · 작업 폴더)'),
+      ...agents.map(a => `- ${a.name} · ${firstLine(a.role).trim() || t('역할 없음')} · ${a.cwd}`),
+      '', t('## 규칙'),
+      t('- 일꾼 수 이하의 조각으로 나누세요. 혼자 해도 되는 작은 일이면 한 명에게만 맡겨도 돼요.'),
+      t('- 두 일꾼이 같은 파일을 고치지 않게 파일·폴더 단위로 나누세요. 역할이 있으면 역할에 맞게 맡기세요.'),
+      t('- 각 조각은 그 일꾼이 다른 설명 없이 바로 할 수 있게, 만들 파일과 지킬 것을 구체적으로 적으세요.'),
+      t('- 지금 폴더의 파일을 읽어 봐도 되지만, 고칠 수는 없어요.'),
+      t('- 어떤 조각이 다른 조각이 만든 파일을 써야 한다면(예: 기능을 만든 뒤에 그 기능의 시험 돌리기) after 에 먼저 끝나야 할 조각 번호를 적으세요. 조각 번호는 tasks 의 순서대로 1부터이고, 앞 번호만 적을 수 있어요. 기다릴 필요가 없으면 after 를 빈 칸([])으로 두세요. 기다리는 조각은 앞 조각이 검사까지 끝난 뒤에 시작해서 그만큼 늦어지니, 꼭 필요할 때만 쓰세요.'),
+      '', t('짧게 설명한 뒤 마지막 줄에 아래 형식의 JSON 한 줄만 적으세요. worker 에는 위 일꾼 이름을 그대로 적으세요.'),
+      t('{"plan":"계획 한두 문장","tasks":[{"worker":"일꾼 이름","task":"맡길 일","after":[]}]}'),
+    ].join('\n');
+  }
+  return [
+    t('[결과 모으기] 계획한 일이 모두 끝났어요. 사용자에게 올릴 최종 보고를 써 주세요.'),
+    '', t('## 사용자가 시킨 일'), p.request,
+    '', t('## 계획'), p.plan || t('(없음)'),
+    '', t('## 일꾼별 결과'),
+    ...p.tasks.flatMap(x => [
+      `### ${x.workerName} · ${t(TASK_KO[x.state] || x.state)}`,
+      `${t('맡은 일:')} ${firstLine(x.text)}`,
+      ...(x.review ? [`${t('검사:')} ${x.review}`] : []),
+      `${t('일꾼의 마지막 보고:')} ${String(x.result || t('(없음)')).slice(0, 1500)}`,
+    ]),
+    '', t('지금 폴더의 파일을 직접 읽어서 일꾼들의 결과가 서로 잘 맞는지(이름·연결·빠진 부분) 확인하세요.'),
+    t('보고에는 무엇이 됐는지, 남은 문제, 사용자가 해야 할 일을 짧게 적으세요. JSON 은 쓰지 마세요.'),
+  ].join('\n');
+}
+
+// 팀장 답의 마지막 JSON 한 줄에서 계획을 읽는다
+function parsePlan(text) {
+  const lines = String(text || '').split('\n').filter(l => l.includes('"tasks"')).reverse();
+  for (const line of lines) {
+    const start = line.indexOf('{');
+    const end = line.lastIndexOf('}');
+    if (start < 0 || end <= start) continue;
+    try {
+      const v = JSON.parse(line.slice(start, end + 1));
+      const tasks = Array.isArray(v.tasks) ? v.tasks.filter(x => x && typeof x.task === 'string' && x.task.trim()).slice(0, MAX_AGENTS) : [];
+      // after: 먼저 끝나야 할 조각 번호(1부터). 자기보다 앞 번호만 받아서 서로 기다리다 멈추는 일이 없게 한다
+      const before = (x, i) => [...new Set((Array.isArray(x.after) ? x.after : []).map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= i))];
+      if (tasks.length) return { plan: String(v.plan || '').slice(0, 600), tasks: tasks.map((x, i) => ({ worker: String(x.worker || '').trim(), task: x.task.trim().slice(0, 4000), after: before(x, i) })) };
+    } catch { /* 다음 줄 */ }
+  }
+  return null;
+}
+
+// 팀장이 적은 일꾼 이름을 실제 일꾼으로 바꾼다 (모르는 이름이면 아직 일을 덜 받은 일꾼에게)
+function resolveWorker(name, used) {
+  const key = name.toLowerCase();
+  const exact = agents.find(a => a.name === name) || agents.find(a => a.name.toLowerCase() === key);
+  if (exact) return exact;
+  return agents.reduce((best, a) => ((used.get(a.id) || 0) < (used.get(best.id) || 0) ? a : best), agents[0]);
+}
+
+function finishLead(ref, status, text) {
+  const p = plans.find(x => x.id === ref.planId);
+  if (!p || p.state === 'stopped') return;
+  if (status !== 'done') {
+    markPlan(p.id, { state: 'stopped', note: status === 'stopped' ? t('팀장을 멈췄어요') : t('팀장이 일하다가 오류가 났어요') });
+    return;
+  }
+  if (ref.phase === 'report') {
+    markPlan(p.id, { state: 'done', final: stripVerdict(text).slice(0, 8000) });
+    addLog(staff.lead, { k: 'sys', text: t('최종 보고를 올렸어요') });
+    broadcast({ type: 'notice', level: 'ok', text: t('팀장이 최종 보고를 올렸어요') });
+    return;
+  }
+  const parsed = parsePlan(text);
+  if (!parsed) {
+    markPlan(p.id, { state: 'stopped', note: t('팀장의 계획을 읽지 못했어요 — 팀장 칸의 과정을 확인해 주세요') });
+    return;
+  }
+  const used = new Map();
+  const tasks = parsed.tasks.map(x => {
+    const a = resolveWorker(x.worker, used);
+    used.set(a.id, (used.get(a.id) || 0) + 1);
+    return { id: newId(), workerId: a.id, workerName: a.name, color: a.color, text: x.task, state: 'waiting', result: '', review: '', after: [] };
+  });
+  parsed.tasks.forEach((x, i) => { tasks[i].after = x.after.map(n => tasks[n - 1].id); });
+  markPlan(p.id, { state: 'proposed', plan: parsed.plan, tasks });
+  addLog(staff.lead, { k: 'sys', text: t('계획을 세웠어요: 일꾼 {n}명에게 {m}개 조각', { n: used.size, m: tasks.length }) });
+  if (!settings.lead.approve) startPlan(p);
+}
+
+// 계획을 시작한다: 기다릴 앞 조각이 없는 조각은 바로 맡기고, 있는 조각은 'blocked' 로 두었다가 앞 조각이 끝나면 맡긴다
+function startPlan(p) {
+  markPlan(p.id, { state: 'running', note: '' });
+  for (const x of p.tasks) x.state = x.after?.length ? 'blocked' : x.state;
+  for (const x of p.tasks) if (x.state !== 'blocked') queueTask(p, x);
+  markPlan(p.id, {});
+}
+
+// 계획 조각 하나를 그 일꾼에게 맡긴다. 앞 조각이 있으면 그 결과(검사 요약)도 같이 알려 준다
+function queueTask(p, x) {
+  const ref = { planId: p.id, taskId: x.id };
+  const a = agents.find(w => w.id === x.workerId);
+  if (!a) { planTaskEnd(ref, 'stopped'); return; }
+  const others = p.tasks.filter(o => o !== x).map(o => `- ${o.workerName}: ${firstLine(o.text).slice(0, 120)}`);
+  const done = p.tasks.filter(d => x.after?.includes(d.id)).map(d => `- ${d.workerName}: ${firstLine(d.text).slice(0, 120)}${d.review ? ` — ${String(d.review).slice(0, 400)}` : ''}`);
+  const text = [
+    `${t('[팀장이 나눈 일 {i}/{n}]', { i: p.tasks.indexOf(x) + 1, n: p.tasks.length })} ${x.text}`,
+    '', `${t('전체 목표:')} ${p.request.slice(0, 1500)}`,
+    ...(done.length ? ['', t('먼저 끝난 조각 (이 결과 위에서 이어서 하세요):'), ...done] : []),
+    ...(others.length ? ['', t('같이 하는 일꾼 (이 일꾼들이 맡은 파일은 건드리지 마세요):'), ...others] : []),
+  ].join('\n');
+  a.queue.push({ id: newId(), text, planTask: ref });
+  x.state = 'queued';
+  sendAgent(a);
+  pump(a);
+}
+
+// 앞 조각이 모두 끝난 조각을 맡긴다. 앞 조각 중 하나라도 끝나지 못했으면(오류·중단) 그 조각도 시작하지 않는다
+function releaseBlocked(p) {
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const x of p.tasks) {
+      if (x.state !== 'blocked') continue;
+      const deps = p.tasks.filter(d => x.after?.includes(d.id));
+      if (deps.some(d => !TASK_DONE.includes(d.state))) continue;
+      if (deps.every(d => d.state === 'done' || d.state === 'left')) queueTask(p, x);
+      else {
+        x.state = 'stopped';
+        x.review = t('앞 조각이 끝나지 못해서 시작하지 않았어요');
+        changed = true;   // 이 조각을 기다리던 다른 조각도 다시 본다
+      }
+    }
+  }
+}
+
+function cancelPlan(p) {
+  for (const a of agents) {
+    const before = a.queue.length;
+    a.queue = a.queue.filter(q => q.planTask?.planId !== p.id);
+    if (a.queue.length !== before) sendAgent(a);
+  }
+  const lead = staff.lead;
+  lead.queue = lead.queue.filter(q => q.plan?.planId !== p.id);
+  for (const x of p.tasks) if (!TASK_DONE.includes(x.state) && x.state !== 'working' && x.state !== 'fixing') x.state = 'stopped';
+  markPlan(p.id, { state: 'stopped', note: t('계획을 취소했어요. 하고 있던 일은 끝까지 해요.') });
+  if (lead.current?.plan?.planId === p.id) stopAgent(lead);
+  sendAgent(lead);
+}
+
+// 계획 조각 하나를 고친다 (quiet 이면 화면에 바로 보내지 않는다)
+function planTaskPatch(pt, patch, quiet) {
+  const p = plans.find(x => x.id === pt.planId);
+  const x = p?.tasks.find(y => y.id === pt.taskId);
+  if (!x || TASK_DONE.includes(x.state)) return null;
+  Object.assign(x, patch);
+  if (!quiet) markPlan(p.id, {});
+  return p;
+}
+
+// 계획 조각이 끝났다. 모든 조각이 끝나면 팀장에게 결과를 모으게 한다
+function planTaskEnd(pt, state, review) {
+  const p = planTaskPatch(pt, { state, ...(review ? { review } : {}) });
+  if (!p || p.state !== 'running') return;
+  releaseBlocked(p);
+  markPlan(p.id, {});
+  if (!p.tasks.every(x => TASK_DONE.includes(x.state))) return;
+  if (!p.tasks.some(x => x.state === 'done' || x.state === 'left')) {   // 하나도 끝나지 못했으면 모을 결과가 없다 (팀장 사용량을 아낀다)
+    markPlan(p.id, { state: 'stopped', note: t('나눈 일이 하나도 끝나지 못해서 결과를 모으지 않았어요') });
+    return;
+  }
+  if (stageOn('lead')) {
+    markPlan(p.id, { state: 'reporting' });
+    queueLead(p, 'report');
+  } else markPlan(p.id, { state: 'done', note: t('팀장이 꺼져 있어서 결과를 모으지 않았어요') });
+}
+
+function enqueue(a, text, extra = {}) {
+  a.queue.push({ id: newId(), text, ...extra });
   sendAgent(a);
   pump(a);
 }
@@ -1781,8 +2183,18 @@ function openFolder(dir) {
   return OK;
 }
 
+function bootCode() {
+  const now = Date.now();
+  for (const [k, until] of BOOT) if (until < now) BOOT.delete(k);
+  const k = crypto.randomBytes(16).toString('hex');
+  BOOT.set(k, now + BOOT_TTL);
+  return k;
+}
+
+// 한 번만 쓰는 번호가 붙은 주소로 창을 연다. --no-open 이면 창 대신 그 주소를 찍어 준다 (다른 브라우저로 열거나 자동 시험에서 쓴다)
 function openWindow() {
-  const url = `http://${HOST}:${PORT}/`;
+  const url = `http://${HOST}:${PORT}/?k=${bootCode()}`;
+  if (!OPEN_WINDOW) return console.log(t('브라우저에서 이 주소를 열어 주세요 (한 번만 쓸 수 있어요): {url}', { url }));
   if (process.platform === 'win32') {
     // 엣지의 '앱 모드'로 열면 주소창 없는 프로그램 창처럼 보인다
     const edge = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA]
@@ -1837,6 +2249,29 @@ function serveIndex(res) {
   });
 }
 
+const hasSession = req => (req.headers.cookie || '').split(';').some(c => c.trim() === `${COOKIE}=${TOKEN}`);
+
+// 창 열기 번호로 들어온 창: 번호를 지우고 (맞으면 쿠키를 주고) 번호 없는 주소로 보낸다
+function enterWithCode(res, k) {
+  const ok = BOOT.get(k) > Date.now();
+  BOOT.delete(k);
+  res.writeHead(302, {
+    Location: '/',
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    ...(ok && { 'Set-Cookie': `${COOKIE}=${TOKEN}; HttpOnly; SameSite=Strict; Path=/` }),
+  });
+  res.end();
+}
+
+// 쿠키 없이 화면을 달라는 요청: 열쇠 없이 다시 여는 법만 알려 준다
+function serveLocked(res) {
+  res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' });
+  res.end(`<!doctype html><html lang="${settings.lang === 'en' ? 'en' : 'ko'}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${t('클로드 관제실')}</title>
+<body style="margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;background:#141413;color:#ece9e2;font:15px/1.6 system-ui,sans-serif;text-align:center">
+<div><h1 style="font-size:19px;margin:0 0 8px">${t('이 창에는 열쇠가 없어요')}</h1><p style="margin:0;color:#a39e93">${t('관제실을 켤 때처럼 실행.bat(바탕화면의 클로드 관제실)을 다시 눌러 주세요. 열쇠가 든 새 창이 열려요.')}</p></div>`);
+}
+
 function openStream(req, res) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
   res.write('retry: 1500\n\n');
@@ -1845,16 +2280,121 @@ function openStream(req, res) {
   req.on('close', () => clients.delete(res));
 }
 
+// ── 파일 첨부: 화면에서 올린 파일을 잠깐 기록 폴더의 uploads 에 두었다가, 보낼 때 받는 에이전트의 작업 폴더 attachments/ 에 복사한다 ──
+// 작업 폴더 안에 두어야 Claude 는 따로 허락 없이 읽고, GPT 는 샌드박스 안에서 읽는다. 사진은 GPT 에게 --image 로도 넘긴다 (경로만으로는 못 본다)
+const MAX_UPLOAD = 25 * 1024 * 1024;   // 파일 하나 25MB
+const MAX_ATTACH = 10;                 // 한 번에 보내는 파일 수
+const MAX_STAGED = 50;                 // 보내기 전에 올려 둘 수 있는 파일 수
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+const uploads = new Map();             // id → { id, name, size, file } (서버를 다시 켜면 비운다)
+const uploadDir = () => path.join(DATA_DIR, 'uploads');
+
+// 파일 이름에서 폴더 부분·윈도에서 못 쓰는 글자·예약 이름을 걷어 낸다 (작업 폴더 밖으로 나가지 못하게)
+function safeName(raw) {
+  let n = String(raw || '').replace(/\\/g, '/').split('/').pop() || '';
+  n = n.replace(/[\x00-\x1f<>:"|?*]/g, '_').replace(/^\s+/, '').replace(/[.\s]+$/, '');
+  if (!n || /^\.+$/.test(n)) n = 'file';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(n)) n = `_${n}`;
+  if (n.length > 80) { const ext = path.extname(n).slice(0, 12); n = n.slice(0, 80 - ext.length) + ext; }
+  return n;
+}
+
+const sizeText = n => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+
+// POST /api/attachments?name=… 몸통이 파일 내용이다 (JSON 이 아니다). 너무 크면 끝까지 받아 버리고 413 을 준다
+function apiUpload(req, rawName) {
+  return new Promise(resolve => {
+    const refuse = (status, msg) => { req.resume(); req.on('end', () => resolve(fail(status, msg))); };
+    if (Number(req.headers['content-length'] || 0) > MAX_UPLOAD) return refuse(413, t('파일이 너무 커요 (한 파일에 25MB까지)'));
+    if (uploads.size >= MAX_STAGED) return refuse(400, t('올려 둔 파일이 너무 많아요. 먼저 보내거나 지워 주세요.'));
+    const id = newId();
+    const name = safeName(rawName);
+    try { fs.mkdirSync(uploadDir(), { recursive: true }); } catch { /* 아래 쓰기에서 알려 준다 */ }
+    const file = path.join(uploadDir(), id);
+    const out = fs.createWriteStream(file);
+    let size = 0;
+    let over = false;
+    req.on('data', c => {
+      size += c.length;
+      if (size > MAX_UPLOAD) over = true;
+      if (!over) out.write(c);
+    });
+    req.on('end', () => out.end(() => {
+      if (over) { fs.rm(file, { force: true }, () => {}); return resolve(fail(413, t('파일이 너무 커요 (한 파일에 25MB까지)'))); }
+      uploads.set(id, { id, name, size, file });
+      resolve([200, { ok: true, id, name, size }]);
+    }));
+    req.on('error', () => { out.destroy(); fs.rm(file, { force: true }, () => {}); resolve(fail(400, t('파일을 받지 못했어요'))); });
+    out.on('error', e => { req.resume(); resolve(fail(400, t('파일을 저장하지 못했어요: {why}', { why: e.message }))); });
+  });
+}
+
+function dropUpload(id) {
+  const u = uploads.get(id);
+  if (!u) return;
+  uploads.delete(id);
+  fs.rm(u.file, { force: true }, () => {});
+}
+
+// 보낼 때 고른 첨부 id 들을 확인한다
+function pickUploads(ids) {
+  if (ids === undefined) return { files: [] };
+  if (!Array.isArray(ids) || ids.length > MAX_ATTACH) return { error: t('첨부 파일은 한 번에 {n}개까지 보낼 수 있어요', { n: MAX_ATTACH }) };
+  const files = ids.map(id => uploads.get(String(id)));
+  if (files.some(f => !f)) return { error: t('첨부 파일을 찾지 못했어요. 다시 올려 주세요.') };
+  return { files };
+}
+
+// 첨부를 한 작업 폴더의 attachments/ 에 복사한다. 같은 이름이 있으면 '이름 (2).확장자' 처럼 피한다
+function copyAttachments(files, cwd) {
+  if (!files.length) return [];
+  const dir = path.join(cwd, 'attachments');
+  fs.mkdirSync(dir, { recursive: true });
+  return files.map(f => {
+    const ext = path.extname(f.name);
+    const base = f.name.slice(0, f.name.length - ext.length);
+    for (let i = 1; ; i++) {
+      const name = i === 1 ? f.name : `${base} (${i})${ext}`;
+      const abs = path.join(dir, name);
+      try {
+        fs.copyFileSync(f.file, abs, fs.constants.COPYFILE_EXCL);
+        return { rel: `attachments/${name}`, abs, size: f.size, image: IMAGE_EXT.test(name) };
+      } catch (e) {
+        if (e.code !== 'EEXIST' || i > 50) throw e;
+      }
+    }
+  });
+}
+
+const attachNote = got => (got.length
+  ? `\n\n${t('[첨부 파일] 사용자가 보낸 파일을 작업 폴더에 넣어 두었어요. 필요하면 열어 보세요:')}\n${got.map(f => `- ${f.rel} (${sizeText(f.size)})`).join('\n')}`
+  : '');
+
 function apiSend(b) {
   const text = cleanText(b.text);
   if (!text) return fail(400, t('보낼 내용이 비었어요'));
-  let targets;
-  if (b.target === 'all') targets = agents.slice();
-  else if (Array.isArray(b.target)) targets = agents.filter(a => b.target.includes(a.id));
-  else targets = [pickAgent()];
-  if (!targets.length) return fail(400, t('보낼 에이전트를 골라 주세요'));
-  for (const a of targets) enqueue(a, text);
-  return [200, { ok: true, sentTo: targets.map(a => a.id) }];
+  const { files, error } = pickUploads(b.attachments);
+  if (error) return fail(400, error);
+  let r;
+  try {
+    if (b.target === 'lead') r = apiLead(text, files);
+    else {
+      let targets;
+      if (b.target === 'all') targets = agents.slice();
+      else if (Array.isArray(b.target)) targets = agents.filter(a => b.target.includes(a.id));
+      else targets = [pickAgent()];
+      if (!targets.length) return fail(400, t('보낼 에이전트를 골라 주세요'));
+      for (const a of targets) {
+        const got = copyAttachments(files, a.cwd);
+        enqueue(a, text + attachNote(got), { images: got.filter(f => f.image).map(f => f.abs) });
+      }
+      r = [200, { ok: true, sentTo: targets.map(a => a.id) }];
+    }
+  } catch (e) {
+    return fail(400, t('첨부 파일을 작업 폴더에 넣지 못했어요: {why}', { why: e.message }));
+  }
+  if (r[0] === 200) for (const f of files) dropUpload(f.id);   // 보낸 첨부는 작업 폴더로 옮겨졌으니 맡아 둔 것은 지운다
+  return r;
 }
 
 function apiAdd() {
@@ -1951,7 +2491,7 @@ function apiUpdate(a, b) {
 function setLang(lang) {
   if (!LANGS.includes(lang) || lang === settings.lang) return;
   settings.lang = lang;
-  supervisor.name = t('감독관');
+  for (const s of staffList()) s.name = t(STAFF_NAME[s.staff]);
   for (const a of agents) {
     const m = a.name.match(/^(?:클로드|Claude) (\d+)$/);
     if (m) a.name = t('클로드 {n}', { n: m[1] });
@@ -1961,7 +2501,7 @@ function setLang(lang) {
     if (a.codexThread) a.langNote = true;
   }
   sendAgents();
-  sendAgent(supervisor);
+  staffList().forEach(sendAgent);
 }
 
 // 저장 폴더를 옮긴다: 새 폴더에 지금 기록을 다 쓴 다음, 앱 폴더의 config.json 에 적고, 예전 폴더의 기록 파일을 지운다
@@ -2021,16 +2561,20 @@ function apiSettings(b) {
   setLang(b.lang);
   if (typeof b.sound === 'boolean') settings.sound = b.sound;
   if (typeof b.hoverMenu === 'boolean') settings.hoverMenu = b.hoverMenu;
-  if (b.supervisor && typeof b.supervisor === 'object') {
-    const s = b.supervisor;
-    const sv = settings.supervisor;
-    if (typeof s.enabled === 'boolean') sv.enabled = s.enabled;
-    if (ENGINES.includes(s.engine)) sv.engine = s.engine;
-    if (MODELS.includes(s.model)) sv.model = s.model;
-    if (typeof s.gptModel === 'string' && GPT_MODEL.test(s.gptModel)) sv.gptModel = s.gptModel;
-    if ([1, 2, 3].includes(Number(s.maxRounds))) sv.maxRounds = Number(s.maxRounds);
-    if (!sv.enabled) supervisor.queue = [];   // 끄면 기다리던 검토는 버린다 (하던 검토는 끝까지 한다)
-    sendAgent(supervisor);
+  if (typeof b.notify === 'boolean') settings.notify = b.notify;
+  if (typeof b.effects === 'boolean') settings.effects = b.effects;
+  for (const k of STAFF_KEYS) {
+    const s = b[k];
+    if (!s || typeof s !== 'object') continue;
+    const cfg = settings[k];
+    if (typeof s.enabled === 'boolean') cfg.enabled = s.enabled;
+    if (ENGINES.includes(s.engine)) cfg.engine = s.engine;
+    if (MODELS.includes(s.model)) cfg.model = s.model;
+    if (typeof s.gptModel === 'string' && GPT_MODEL.test(s.gptModel)) cfg.gptModel = s.gptModel;
+    if (k === 'supervisor' && [1, 2, 3].includes(Number(s.maxRounds))) cfg.maxRounds = Number(s.maxRounds);
+    if (k === 'lead' && typeof s.approve === 'boolean') cfg.approve = s.approve;
+    if (!cfg.enabled && staff[k].queue.length) staff[k].queue = [];   // 끄면 기다리던 일은 버린다 (하던 일은 끝까지 한다)
+    sendAgent(staff[k]);
   }
   const fbBefore = JSON.stringify([settings.fallbackEnabled, settings.fallbackUrl, settings.fallbackKey, settings.fallbackModels]);
   if (typeof b.fallbackUrl === 'string') {
@@ -2057,6 +2601,7 @@ function apiSettings(b) {
 }
 
 async function route(method, p, b) {
+  if (method === 'GET' && p === '/api/state') return [200, snapshot()];   // 화면이 처음 받는 것과 같은 상태 (자동 시험·스크립트가 읽는다)
   if (method === 'POST' && p === '/api/send') return apiSend(b);
   if (method === 'POST' && p === '/api/agents') return apiAdd();
   if (method === 'POST' && p === '/api/apply-all') return apiApplyAll(b);
@@ -2066,6 +2611,7 @@ async function route(method, p, b) {
   if (method === 'POST' && p === '/api/setup') return apiSetup(b);
   if (method === 'POST' && p === '/api/data-dir') return apiDataDir(b);
   if (method === 'POST' && p === '/api/open-data') return openFolder(DATA_DIR);
+  if (method === 'GET' && p === '/api/diagnostics') return [200, diagnostics()];
   if (method === 'POST' && p === '/api/auth/check') { checkAuth(); return OK; }
   if (method === 'POST' && p === '/api/auth/login') { const why = openLogin(); return why ? fail(400, why) : OK; }
   if (method === 'POST' && p === '/api/claude/detect') { detectClaude(); return OK; }
@@ -2082,16 +2628,30 @@ async function route(method, p, b) {
     return [200, { ok: true, name: r.name, ccr }];
   }
   if (method === 'POST' && p === '/api/pick-folder') return [200, { path: await pickFolder(b.initial, b.purpose) }];
-  if (method === 'DELETE' && p === '/api/history') { history = []; reports = []; broadcast({ type: 'history-clear' }); save(); return OK; }
+  if (method === 'DELETE' && p === '/api/history') { history = []; reports = []; plans = []; broadcast({ type: 'history-clear' }); save(); return OK; }
   if (method === 'POST' && p === '/api/shutdown') { setTimeout(shutdown, 150); return OK; }
+
+  const pm = p.match(/^\/api\/plans\/([\w-]+)\/(start|cancel)$/);
+  if (pm && method === 'POST') {
+    const plan = plans.find(x => x.id === pm[1]);
+    if (!plan) return fail(404, t('그 계획은 이제 없어요'));
+    if (pm[2] === 'start') {
+      if (plan.state !== 'proposed') return fail(400, t('허락을 기다리는 계획만 시작할 수 있어요'));
+      startPlan(plan);
+    } else {
+      if (!PLAN_LIVE.includes(plan.state)) return fail(400, t('이미 끝난 계획이에요'));
+      cancelPlan(plan);
+    }
+    return OK;
+  }
 
   const m = p.match(/^\/api\/agents\/([\w-]+)(?:\/([\w-]+))?(?:\/([\w-]+))?$/);
   if (!m) return fail(404, t('없는 주소예요'));
-  const a = m[1] === 'supervisor' ? supervisor : agents.find(x => x.id === m[1]);
+  const a = staff[m[1]] || agents.find(x => x.id === m[1]);
   if (!a) return fail(404, t('그 에이전트는 이제 없어요'));
   const act = m[2];
-  // 감독관은 멈추기·새 대화만 된다 (설정은 설정 창에서, 일은 일꾼이 끝낸 뒤 저절로 받는다)
-  if (a.isSupervisor && !(method === 'POST' && (act === 'stop' || act === 'reset'))) return fail(400, t('감독관은 멈추기만 할 수 있어요'));
+  // 관리하는 자리는 멈추기·새 대화·허락 답하기만 된다 (설정은 관리 창에서, 일은 저절로 받는다)
+  if (a.staff && !(method === 'POST' && ['stop', 'reset', 'permission'].includes(act))) return fail(400, t('관리하는 자리는 멈추기와 허락만 할 수 있어요'));
   if (method === 'PATCH' && !act) return apiUpdate(a, b);
   if (method === 'DELETE' && !act) {
     if (agents.length <= MIN_AGENTS) return fail(400, t('에이전트는 최소 {n}명은 있어야 해요', { n: MIN_AGENTS }));
@@ -2134,13 +2694,26 @@ async function handle(req, res) {
   // DNS 리바인딩 공격 막기: 내 PC 주소로 들어온 요청만 받는다
   if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(req.headers.host || '')) return sendJson(res, 403, { error: t('허용되지 않은 주소예요') });
   const url = new URL(req.url, `http://${HOST}`);
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return serveIndex(res);
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+    if (url.searchParams.has('k')) return enterWithCode(res, url.searchParams.get('k'));
+    return hasSession(req) ? serveIndex(res) : serveLocked(res);
+  }
   if (req.method === 'GET' && url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
   if (!url.pathname.startsWith('/api/')) return sendJson(res, 404, { error: t('없는 주소예요') });
-  if ((req.headers['x-token'] || url.searchParams.get('token')) !== TOKEN) {
+  // 화면 연결(EventSource)은 머리글을 못 붙여 쿠키로 연다. 다른 출처의 페이지는 이 연결을 읽을 수 없다
+  const events = req.method === 'GET' && url.pathname === '/api/events';
+  if (req.headers['x-token'] !== TOKEN && !(events && hasSession(req))) {
     return sendJson(res, 401, { error: t('화면을 새로 고침해 주세요 (열쇠가 맞지 않아요)') });
   }
-  if (req.method === 'GET' && url.pathname === '/api/events') return openStream(req, res);
+  if (events) return openStream(req, res);
+  if (req.method === 'POST' && url.pathname === '/api/attachments') {   // 몸통이 파일 그대로라 JSON 으로 읽지 않는다
+    const [status, data] = await apiUpload(req, url.searchParams.get('name'));
+    return sendJson(res, status, data);
+  }
+  if (req.method === 'DELETE' && url.pathname.startsWith('/api/attachments/')) {
+    dropUpload(url.pathname.slice('/api/attachments/'.length));
+    return sendJson(res, 200, { ok: true });
+  }
   const body = req.method === 'POST' || req.method === 'PATCH' ? await readBody(req) : {};
   const [status, data] = await route(req.method, url.pathname, body);
   sendJson(res, status, data);
@@ -2184,13 +2757,15 @@ function banner() {
   ].join('\n'));
 }
 
+fs.mkdirSync(HOME, { recursive: true });
 loadState();
 if (settings.defaultCwd === WORKDIR) fs.mkdirSync(WORKDIR, { recursive: true });
 
 server.on('error', e => {
   if (e.code === 'EADDRINUSE') {
+    // 이미 켜진 관제실에게 쪽지로 창을 열어 달라고 한다 (열쇠는 그쪽만 안다)
     console.log(t('이미 켜져 있어요 (포트 {port}). 화면 창만 다시 열게요.', { port: PORT }));
-    if (OPEN_WINDOW) openWindow();
+    try { fs.writeFileSync(openRequest(), ''); } catch { /* 데이터 폴더가 없다 = 그 포트를 다른 프로그램이 쓰고 있다 */ }
     setTimeout(() => process.exit(0), 1500);
     return;
   }
@@ -2199,12 +2774,20 @@ server.on('error', e => {
 });
 
 server.listen(PORT, HOST, () => {
+  // 여기부터는 이 서버가 포트를 잡은 뒤에만 한다 (또 켠 쪽이 켜져 있는 쪽의 첨부를 지우지 않게)
+  try { fs.rmSync(uploadDir(), { recursive: true, force: true }); } catch { /* 보내지 않고 남은 첨부 (지난번에 켰을 때 것) */ }
+  try { fs.rmSync(openRequest(), { force: true }); } catch { /* 지난번 쪽지 */ }
+  setInterval(() => {
+    if (!fs.existsSync(openRequest())) return;
+    try { fs.rmSync(openRequest(), { force: true }); } catch { /* 지우지 못하면 다음에 또 연다 */ }
+    openWindow();
+  }, 1000).unref();
   banner();
   detectClaude();
   detectCodex();
   ensureCcr();
   console.log(claude.path ? t('claude 위치: {path}', { path: claude.path }) : t('claude 를 찾지 못했어요. 화면의 설정 창에서 위치를 알려 주세요.'));
-  if (OPEN_WINDOW) openWindow();
+  openWindow();
 });
 
 setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 15000).unref();
