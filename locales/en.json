@@ -550,7 +550,7 @@
   "크게 보기 닫기 · 메뉴 닫기": "Close expanded view · close menu",
   "알아 두면 좋아요": "Good to know",
   "에이전트를 여러 명 돌리면 Claude 사용량도 그만큼 빨리 줄어요.": "Running more agents uses up Claude usage that much faster.",
-  "@help-tip-2": "<b>All agents</b> under the prompt box changes every agent's model, effort, speed and permissions at once. To change just one, use Agents.",
+  "@help-tip-2": "Under the prompt box, <b>Agents</b> −/+ changes how many agents there are, and <b>Settings</b> changes every agent's model, effort, speed and permissions at once. To change just one, use Agents.",
   "@help-tip-3": "<b>Speed: Fast ↯</b> runs Opus up to 2.5x faster, but it's billed from paid <b>usage credits</b>, not your plan's usage. Without credits turned on, it runs at normal speed.",
   "여러 에이전트가 같은 폴더에서 같은 파일을 고치면 서로 덮어쓸 수 있어요. 역할을 나누거나 폴더를 따로 주세요.": "If several agents edit the same file in the same folder, they can overwrite each other. Split their roles or give them separate folders.",
   "@help-tip-5": "Agents remember their conversation. For something completely different, press <b>New conversation</b> in Agents.",
@@ -741,5 +741,9 @@
   "이 창에는 열쇠가 없어요": "This window has no key",
   "관제실을 켤 때처럼 실행.bat(바탕화면의 클로드 관제실)을 다시 눌러 주세요. 열쇠가 든 새 창이 열려요.": "Run 실행.bat (the Claude Control Room shortcut on your desktop) again, just like when you start the app. A new window with the key will open.",
   "GPT 샌드박스: mxc (이 PC 안 접속과 인터넷을 막아요)": "GPT sandbox: mxc (blocks connections to this PC and the internet)",
-  "GPT 샌드박스: unelevated (이 PC에서는 mxc 를 쓸 수 없어요)": "GPT sandbox: unelevated (mxc isn't available on this PC)"
+  "GPT 샌드박스: unelevated (이 PC에서는 mxc 를 쓸 수 없어요)": "GPT sandbox: unelevated (mxc isn't available on this PC)",
+  "인원": "Agents",
+  "골라서 보내기": "Pick agents",
+  "{name} 외 {n}명": "{name} +{n}",
+  "보낼 곳: {v}": "Send to: {v}"
 }

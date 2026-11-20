@@ -410,7 +410,7 @@
     font: 15px/1.6 var(--mono);
   }
   #prompt::placeholder { color: var(--dim); }
-  .prompt-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding-top: 11px; border-top: 1px dashed var(--line-2); }
+  .prompt-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; padding-top: 11px; border-top: 1px dashed var(--line-2); }
   /* 파일 첨부: 프롬프트 창에 끌어다 놓으면 테두리가 밝아지고, 올린 파일은 칩으로 보인다 */
   .prompt.drop { border-color: var(--accent); box-shadow: 0 0 0 4px rgb(217 119 87 / .2); }
   .attach-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0 22px; }
@@ -429,10 +429,29 @@
   .att-x { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
   .att-x:hover { background: var(--panel-3); color: var(--text); }
   .attach-btn { flex: none; }
-  .targets { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .prompt-foot .send { flex: none; }
   .t-label { font-size: 12px; color: var(--dim); margin-right: 2px; }
-  /* 프롬프트 창 맨 아래: 모든 에이전트의 모델·생각 깊이·속도·허락 */
-  .prompt-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  /* 글 칸 아래 한 줄: [보낼 곳 ▾] 인원 [−] N명 [+] [⚙ 설정 ▾] … 📎 [보내기] */
+  .target-btn { color: var(--accent); border-color: rgb(217 119 87 / .55); max-width: 220px; }
+  .target-btn > .tb-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .target-btn::after, .set-btn::after { content: '▾'; font-size: 10px; color: var(--dim); }
+  .target-btn[aria-expanded="true"], .set-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--text); }
+  .people { display: inline-flex; align-items: center; gap: 6px; }
+  .stepper.mini { border-radius: 999px; }
+  .stepper.mini button { width: 26px; height: 24px; font-size: 15px; }
+  .stepper.mini output { min-width: 40px; font-size: 12px; }
+  .set-btn .i { width: 14px; height: 14px; }
+  .set-btn.hot { border-color: rgb(255 210 63 / .55); }
+  .set-hot { color: var(--hat); font-weight: 700; }
+  .attach-btn { margin-left: auto; }
+  /* 보낼 곳 메뉴: 고른 것 앞에 ✓, 일꾼은 색 점과 함께 */
+  .t-menu > button .tick { width: 12px; flex: none; color: var(--accent); }
+  .t-menu .t-sep { margin: 4px 0 2px; padding: 6px 8px 2px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--dim); }
+  /* ⚙ 설정 판: 모든 에이전트의 모델·생각 깊이·속도·허락 */
+  .set-menu { width: 300px; }
+  .set-menu .all-bar { display: grid; gap: 6px; padding: 4px 2px; }
+  .set-menu .tool { display: flex; justify-content: space-between; border-radius: 9px; }
+  .set-menu .tool select { max-width: 190px; }
   .tool {
     display: inline-flex; align-items: center;
     padding-left: 10px;
@@ -673,8 +692,6 @@
   .plan-final { padding: 8px 10px; max-height: 240px; overflow: auto; background: #070707; border: 1px solid var(--line); border-radius: 7px; color: var(--text); }
   .plan-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .plan-foot .rep-time { margin-left: auto; }
-  .chip.lead-chip { border-style: dashed; }
-  .chip.lead-chip[aria-pressed="true"] { border-style: solid; border-color: #b58cff; background: rgb(181 140 255 / .14); }
   .sup-off {
     display: flex; align-items: center; gap: 12px;
     padding: 8px 14px;
@@ -1140,12 +1157,20 @@
             </div>
             <div class="attach-list" id="attachList" hidden></div>
             <div class="prompt-foot">
-              <div class="targets" id="targets"></div>
+              <button type="button" class="chip target-btn" id="targetBtn" aria-haspopup="menu" aria-expanded="false"></button>
+              <span class="people">
+                <span class="t-label">인원</span>
+                <span class="stepper mini" title="에이전트 수">
+                  <button type="button" id="homeDown" aria-label="한 명 줄이기">−</button>
+                  <output id="homeCount">0명</output>
+                  <button type="button" id="homeUp" aria-label="한 명 늘리기">+</button>
+                </span>
+              </span>
+              <button type="button" class="chip set-btn" id="setBtn" aria-haspopup="dialog" aria-expanded="false"><svg class="i" viewBox="0 0 16 16"><path d="M2 4h7M12 4h2M2 8h2M7 8h7M2 12h9M14 12h0"/><circle cx="10.5" cy="4" r="1.5"/><circle cx="5.5" cy="8" r="1.5"/><circle cx="12.5" cy="12" r="1.5"/></svg><span>설정</span><span class="set-hot" id="setHot" hidden>↯</span></button>
               <button type="button" class="icon-btn attach-btn" id="attachBtn" title="파일 넣기 · 끌어다 놓거나 Ctrl+V 로 붙여 넣어도 돼요" aria-label="파일 넣기"><svg class="i" viewBox="0 0 16 16"><path d="M10.6 4.6 5.9 9.3a1.5 1.5 0 0 0 2.1 2.1l5-5a2.9 2.9 0 0 0-4.1-4.1l-5 5a4.3 4.3 0 0 0 6.1 6.1l4-4"/></svg></button>
               <input type="file" id="fileInput" multiple hidden>
               <button class="btn primary send" id="sendBtn">보내기 <kbd>Enter</kbd></button>
             </div>
-            <div class="prompt-tools all-bar" id="allBar"></div>
           </div>
         </div>
         <div class="banner" id="authBanner" hidden>
@@ -1335,7 +1360,7 @@
             <h2>알아 두면 좋아요</h2>
             <ul>
               <li>에이전트를 여러 명 돌리면 Claude 사용량도 그만큼 빨리 줄어요.</li>
-              <li data-i18n="help-tip-2">프롬프트 창 아래 <b>모두에게</b>에서 모든 에이전트의 모델·생각 깊이·속도·허락을 한꺼번에 바꿔요. 한 명만 바꾸려면 관리 창에서 바꿔요.</li>
+              <li data-i18n="help-tip-2">프롬프트 창 아래 <b>인원</b> −/+ 로 에이전트 수를, <b>설정</b>에서 모든 에이전트의 모델·생각 깊이·속도·허락을 한꺼번에 바꿔요. 한 명만 바꾸려면 관리 창에서 바꿔요.</li>
               <li data-i18n="help-tip-3"><b>속도: 빠르게 ↯</b>는 Opus를 최대 2.5배 빠르게 돌리지만, 요금제 사용량이 아니라 유료 <b>사용량 크레딧</b>에서 따로 돈이 나가요. 크레딧을 켜 두지 않았으면 보통 속도로 돌아요.</li>
               <li>여러 에이전트가 같은 폴더에서 같은 파일을 고치면 서로 덮어쓸 수 있어요. 역할을 나누거나 폴더를 따로 주세요.</li>
               <li data-i18n="help-tip-5">에이전트는 대화를 기억해요. 전혀 다른 일을 시키려면 관리 창에서 <b>새 대화</b>를 누르세요.</li>
@@ -1391,6 +1416,12 @@
 <div id="approvals" aria-live="polite"></div>
 <div id="aiMenu" class="ai-menu" role="menu" aria-label="다른 AI에게 넘기기" hidden></div>
 <div id="queueMenu" class="ai-menu q-menu" role="dialog" aria-label="기다리는 일" hidden></div>
+<div id="targetMenu" class="ai-menu t-menu" role="menu" aria-label="보낼 곳" hidden></div>
+<div id="setMenu" class="ai-menu set-menu" role="dialog" aria-label="모두에게" hidden>
+  <div class="ai-menu-head"><b>모두에게</b></div>
+  <div class="all-bar" id="allBar"></div>
+  <p class="ai-menu-note" id="allNote"></p>
+</div>
 <div id="confetti" aria-hidden="true"></div>
 <div id="ask" hidden>
   <div class="ask-box" role="alertdialog" aria-modal="true" aria-labelledby="askText">
@@ -2307,16 +2338,55 @@ function skyKick() {
   sky.raf = requestAnimationFrame(skyDraw);
 }
 
-function renderTargets() {
+// 보낼 곳 버튼에 보이는 글자: 자동 배정 / 전체 N명 / 팀장에게 / 고른 일꾼 (세 명부터는 '외 N명')
+function targetText() {
   const tgt = S.target;
-  $('#targets').innerHTML = `<span class="t-label">${t('보낼 곳')}</span>`
-    + `<button type="button" class="chip" data-t="auto" aria-pressed="${tgt === 'auto'}" title="${esc(t('가장 한가한 에이전트 한 명에게 보내요'))}">${t('자동 배정')}</button>`
-    + `<button type="button" class="chip" data-t="all" aria-pressed="${tgt === 'all'}" title="${esc(t('모든 에이전트에게 똑같이 보내요'))}">${t('전체 {n}명', { n: S.agents.length })}</button>`
-    + (staffOn('lead') ? `<button type="button" class="chip lead-chip" data-t="lead" aria-pressed="${tgt === 'lead'}" title="${esc(t('팀장이 계획을 세워서 일꾼들에게 나눠 맡겨요'))}">${t('팀장에게')}</button>` : '')
-    + S.agents.map(a => `<button type="button" class="chip" data-t="${a.id}" style="--c:${esc(a.color)}" aria-pressed="${Array.isArray(tgt) && tgt.includes(a.id)}"><span class="dot"></span>${esc(a.name)}</button>`).join('');
+  if (tgt === 'all') return t('전체 {n}명', { n: S.agents.length });
+  if (tgt === 'lead') return t('팀장에게');
+  const names = Array.isArray(tgt) ? tgt.map(agentById).filter(Boolean).map(a => a.name) : [];
+  if (!names.length) return t('자동 배정');
+  return names.length <= 2 ? names.join('·') : t('{name} 외 {n}명', { name: names[0], n: names.length - 1 });
 }
 
-// 프롬프트 창 맨 아래 '모두에게': 모든 에이전트의 모델·생각 깊이·속도·허락을 한꺼번에 바꾼다.
+// 글 칸 아래 한 줄: 보낼 곳 버튼과 인원 −/+ (보낼 곳 메뉴가 열려 있으면 그것도 다시 그린다)
+function renderTargets() {
+  const one = Array.isArray(S.target) && S.target.length === 1 ? agentById(S.target[0]) : null;
+  const text = targetText();
+  const btn = $('#targetBtn');
+  btn.innerHTML = `${one ? `<span class="dot" style="--c:${esc(one.color)}"></span>` : ''}<span class="tb-text">${esc(text)}</span>`;
+  btn.title = t('보낼 곳: {v}', { v: text });
+  btn.setAttribute('aria-label', btn.title);
+  const n = S.agents.length;
+  $('#homeCount').textContent = t('{n}명', { n });
+  $('#homeDown').disabled = n <= S.limits.min;
+  $('#homeUp').disabled = n >= S.limits.max;
+  if (!$('#targetMenu').hidden) renderTargetMenu();
+}
+
+// 보낼 곳 메뉴: 자동·전체·팀장은 하나만, 일꾼은 여러 명을 켜고 끈다 (고른 것 앞에 ✓)
+function renderTargetMenu() {
+  const tgt = S.target;
+  const tick = on => `<span class="tick">${on ? '✓' : ''}</span>`;
+  const one = (v, on, label, title) => `<button type="button" role="menuitemradio" aria-checked="${on}" data-t="${v}" title="${esc(title)}">${tick(on)}${esc(label)}</button>`;
+  $('#targetMenu').innerHTML = one('auto', tgt === 'auto', t('자동 배정'), t('가장 한가한 에이전트 한 명에게 보내요'))
+    + one('all', tgt === 'all', t('전체 {n}명', { n: S.agents.length }), t('모든 에이전트에게 똑같이 보내요'))
+    + (staffOn('lead') ? one('lead', tgt === 'lead', t('팀장에게'), t('팀장이 계획을 세워서 일꾼들에게 나눠 맡겨요')) : '')
+    + `<div class="t-sep">${t('골라서 보내기')}</div>`
+    + S.agents.map(a => {
+      const on = Array.isArray(tgt) && tgt.includes(a.id);
+      return `<button type="button" role="menuitemcheckbox" aria-checked="${on}" data-t="${a.id}">${tick(on)}<span class="dot" style="--c:${esc(a.color)}"></span>${esc(a.name)}</button>`;
+    }).join('');
+}
+
+// 프롬프트 줄의 보낼 곳 메뉴·설정 판: 같은 버튼을 다시 누르면 닫힌다
+function toggleMenu(menu, btn, draw) {
+  if (!menu.hidden) return closeMenus(true);
+  draw();
+  placeMenu(menu, btn, 'left');
+  btn.setAttribute('aria-expanded', 'true');
+}
+
+// ⚙ 설정 판의 '모두에게': 모든 에이전트의 모델·생각 깊이·속도·허락을 한꺼번에 바꾼다.
 // 에이전트마다 값이 다르면 '제각각'으로 보여 준다.
 const ALL_FIELDS = [
   ['aimodel', t('모델'), agentAiModel, aiModelOptions],
@@ -2328,8 +2398,8 @@ const ALL_FIELDS = [
 function renderAllBar() {
   const bar = $('#allBar');
   if (!bar.childElementCount) {
-    bar.innerHTML = `<span class="t-label" title="${esc(t('모든 에이전트와 새로 늘릴 에이전트에 한꺼번에 적용돼요. 한 명만 바꾸려면 에이전트 관리 창에서, 감독관은 감독관 카드에서 따로 바꿔요.'))}">${t('모두에게')}</span>`
-      + ALL_FIELDS.map(([key, label]) => `<label class="tool"><span>${label}</span><select data-all="${key}" aria-label="${esc(t('모든 에이전트의 {label}', { label }))}"></select></label>`).join('');
+    bar.innerHTML = ALL_FIELDS.map(([key, label]) => `<label class="tool"><span>${label}</span><select data-all="${key}" aria-label="${esc(t('모든 에이전트의 {label}', { label }))}"></select></label>`).join('');
+    $('#allNote').textContent = t('모든 에이전트와 새로 늘릴 에이전트에 한꺼번에 적용돼요. 한 명만 바꾸려면 에이전트 관리 창에서, 감독관은 감독관 카드에서 따로 바꿔요.');
   }
   for (const [key, , read, html] of ALL_FIELDS) {
     const values = [...new Set(S.agents.map(read))];
@@ -2339,6 +2409,11 @@ function renderAllBar() {
     sel.closest('.tool').classList.toggle('hot', key === 'fast' && value === 'true');
   }
   $('[data-all="fast"]', bar).disabled = S.agents.length > 0 && S.agents.every(a => a.engine === 'codex');   // GPT 에는 빠른 모드가 없다
+  // 판을 접어 둬도 보이게: 돈이 드는 빠른 모드가 한 명이라도 켜져 있으면 ⚙ 버튼에 ↯, 마우스를 올리면 네 값 요약
+  const hot = S.agents.some(a => a.fast);
+  $('#setBtn').classList.toggle('hot', hot);
+  $('#setHot').hidden = !hot;
+  $('#setBtn').title = `${t('모두에게')} — ${ALL_FIELDS.map(([key, label]) => `${label} ${$(`[data-all="${key}"]`, bar).selectedOptions[0]?.textContent || ''}`).join(' · ')}`;
 }
 
 // 빠른 모드는 요금제에 들어 있지 않고 유료 사용량 크레딧에서 돈이 나가서, 켤 때마다 한 번 더 묻는다
@@ -2785,20 +2860,23 @@ function openAiMenu(a, btn) {
 
 // 버튼 바로 아래(자리가 없으면 위)에 메뉴를 띄우고 첫 버튼에 포커스를 준다
 let menuFrom = null;   // 메뉴를 연 버튼: Esc 로 닫거나 고르고 나면 포커스를 돌려준다
-function placeMenu(menu, btn) {
+function placeMenu(menu, btn, align) {
   closeMenus();
   menu.hidden = false;
   const b = btn.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, b.right - menu.offsetWidth))}px`;
+  const x = align === 'left' ? b.left : b.right - menu.offsetWidth;   // 'left': 버튼 왼쪽 끝에 맞춘다 (프롬프트 줄 왼쪽의 버튼들)
+  menu.style.left = `${Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, x))}px`;
   menu.style.top = `${b.bottom + 6 + menu.offsetHeight > innerHeight ? Math.max(8, b.top - menu.offsetHeight - 6) : b.bottom + 6}px`;
   menuFrom = btn;
   $('button:not(:disabled)', menu)?.focus();
 }
 
+const MENUS = ['#aiMenu', '#queueMenu', '#targetMenu', '#setMenu'];
+const menuOpen = () => MENUS.some(id => !$(id).hidden);
 function closeMenus(refocus) {
-  const open = !$('#aiMenu').hidden || !$('#queueMenu').hidden;
-  $('#aiMenu').hidden = true;
-  $('#queueMenu').hidden = true;
+  const open = menuOpen();
+  for (const id of MENUS) $(id).hidden = true;
+  for (const id of ['#targetBtn', '#setBtn']) $(id).setAttribute('aria-expanded', 'false');
   if (open && refocus === true && menuFrom?.isConnected) menuFrom.focus();
   menuFrom = null;
 }
@@ -3472,18 +3550,28 @@ function wire() {
     renderAllBar();
     if (r) toast(t('에이전트 {n}명 모두에게 적용했어요', { n: S.agents.length }) + (S.agents.some(isWorking) ? ` · ${t('일하는 중인 에이전트는 다음 일부터')}` : ''), 'ok');
   });
-  $('#targets').addEventListener('click', e => {
-    const chip = e.target.closest('[data-t]');
-    if (!chip) return;
-    const v = chip.dataset.t;
-    if (v === 'auto' || v === 'all' || v === 'lead') S.target = v;
-    else {
-      const picked = Array.isArray(S.target) ? S.target.slice() : [];
-      const next = picked.includes(v) ? picked.filter(x => x !== v) : [...picked, v];
-      S.target = next.length ? next : 'auto';
+  // 글 칸 아래 한 줄: 보낼 곳 메뉴, 인원 −/+, ⚙ 설정 판
+  $('#targetBtn').addEventListener('click', e => toggleMenu($('#targetMenu'), e.currentTarget, renderTargetMenu));
+  $('#setBtn').addEventListener('click', e => toggleMenu($('#setMenu'), e.currentTarget, renderAllBar));
+  $('#homeUp').addEventListener('click', () => api('POST', '/api/agents'));
+  $('#homeDown').addEventListener('click', removeLast);
+  $('#targetMenu').addEventListener('click', e => {
+    const item = e.target.closest('[data-t]');
+    if (!item) return;
+    const v = item.dataset.t;
+    if (v === 'auto' || v === 'all' || v === 'lead') {
+      S.target = v;
+      closeMenus();
+      renderTargets();
+      ta.focus();
+      return;
     }
+    // 일꾼은 여러 명을 켜고 끈다. 메뉴는 열어 둔 채 다시 그린다 (아무도 안 남으면 자동 배정)
+    const picked = Array.isArray(S.target) ? S.target.slice() : [];
+    const next = picked.includes(v) ? picked.filter(x => x !== v) : [...picked, v];
+    S.target = next.length ? next : 'auto';
     renderTargets();
-    ta.focus();
+    $(`[data-t="${v}"]`, $('#targetMenu'))?.focus();
   });
 
   // 작업 현황
@@ -3603,7 +3691,7 @@ function wire() {
     if (b) api('DELETE', `/api/agents/${$('#queueMenu').dataset.id}/queue/${b.dataset.qdel}`);   // 서버가 바뀐 목록을 보내면 onAgent 가 다시 그린다
   });
   document.addEventListener('pointerdown', e => {
-    if (!e.target.closest('.ai-menu, [data-act="handover"], [data-act="queue"]')) closeMenus();
+    if (!e.target.closest('.ai-menu, [data-act="handover"], [data-act="queue"], #targetBtn, #setBtn')) closeMenus();
   });
   window.addEventListener('resize', () => closeMenus());
   $('#grid').addEventListener('scroll', () => closeMenus());   // 칸 목록 자체를 굴릴 때만 닫는다 (칸 안의 기록이 저절로 굴러가는 건 버튼 자리를 바꾸지 않는다)
@@ -3776,7 +3864,7 @@ function wire() {
     }
     if (e.key === 'Escape') {
       if (askDone) askDone(false);
-      else if (!$('#aiMenu').hidden || !$('#queueMenu').hidden) closeMenus(true);
+      else if (menuOpen()) closeMenus(true);
       else if (S.focus && S.view === 'live') { S.focus = null; layoutGrid(); } else closeSide(true);
     }
   });
