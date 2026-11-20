@@ -112,7 +112,7 @@ let reports = [];   // 검사 보고: 검사한 일 하나에 카드 하나. 고
 let plans = [];     // 팀장 계획: 큰 일 하나에 계획 하나 (조각마다 맡은 일꾼과 진행 상태)
 let auth ={ checked: false, checking: false, loggedIn: null, method: null };
 let claude = { path: null, version: null };
-let codex = { path: null, version: null, loggedIn: null, method: null, models: [] };   // GPT 를 돌리는 공식 Codex CLI
+let codex = { path: null, version: null, loggedIn: null, method: null, models: [], sandbox: null };   // GPT 를 돌리는 공식 Codex CLI (sandbox: 윈도에서 쓸 샌드박스, 켤 때 확인)
 let rateStatus = 'allowed';
 let limit = { hit: false, until: 0, at: 0 };               // Claude 사용량 한도 (계정 전체라서 에이전트끼리 같이 쓴다)
 let ccr = { checked: false, ok: false, error: '', models: [] };   // CCR 게이트웨이 상태
@@ -338,7 +338,7 @@ function diagnostics() {
     node: process.version,
     os: `${process.platform} ${os.release()} ${process.arch}`,
     claude: { found: !!claude.path, version: claude.version, loggedIn: auth.loggedIn, method: auth.method },
-    codex: { found: !!codex.path, version: codex.version, loggedIn: codex.loggedIn, models: codex.models.length },
+    codex: { found: !!codex.path, version: codex.version, loggedIn: codex.loggedIn, models: codex.models.length, sandbox: codex.sandbox },
     ccr: { managed: MANAGE_CCR, running: !!(ccrProc && !ccrProc.ended), ok: ccr.ok, error: ccr.error, models: ccr.models.length },
     limit,
     settings: { ...rest, fallbackKey: fallbackKey ? '(set)' : '', claudePath: tidy(claudePath), defaultCwd: tidy(defaultCwd) },
@@ -544,10 +544,23 @@ function codexModels() {
 }
 
 function detectCodex() {
-  codex = { path: findCodex(), version: null, loggedIn: null, method: null, models: codexModels() };
+  codex = { path: findCodex(), version: null, loggedIn: null, method: null, models: codexModels(), sandbox: null };
   broadcast({ type: 'codex', codex });
   if (!codex.path) return;
   const found = codex.path;
+  // 윈도: 새 샌드박스(mxc)를 쓸 수 있는지 AI 없이 한 번 본다. mxc 는 이 PC(127.0.0.1)와 인터넷 연결을 막고, 읽기 전용에서도 한글이
+  // 깨지지 않는다. unelevated 는 둘 다 못 막아서 GPT 가 관제실·CCR 에 접속할 수 있다 (2026-11-20 진짜 Codex 0.167 로 확인).
+  // 안에서 닫힌 포트로 연결해 보아 EACCES(막힘)가 나오면 mxc 를 쓴다. mxc 가 없는 PC 는 unelevated 로 돌린다
+  if (process.platform === 'win32') {
+    const probe = "require('net').connect(9,'127.0.0.1').on('connect',()=>{console.log('CR_NET_OPEN');process.exit()}).on('error',e=>console.log('CR_NET_'+e.code))";
+    const [cmd3, args3] = command(found, ['sandbox', '-P', ':read-only', '-c', 'windows.sandbox=mxc', '-C', os.tmpdir(), '--', process.execPath, '-e', probe]);
+    execFile(cmd3, args3, { env: childEnv(), windowsHide: true, timeout: 30000 }, (err, out) => {
+      if (codex.path !== found) return;
+      codex.sandbox = /CR_NET_EACCES/.test(String(out || '')) ? 'mxc' : 'unelevated';
+      console.log(codex.sandbox === 'mxc' ? t('GPT 샌드박스: mxc (이 PC 안 접속과 인터넷을 막아요)') : t('GPT 샌드박스: unelevated (이 PC에서는 mxc 를 쓸 수 없어요)'));
+      broadcast({ type: 'codex', codex });
+    });
+  }
   const [cmd, args] = command(found, ['--version']);
   execFile(cmd, args, { env: childEnv(), windowsHide: true, timeout: 30000 }, (err, out) => {
     if (codex.path !== found) return;
@@ -610,9 +623,9 @@ function codexArgs(a, resume) {
   const opts = ['--json', '--ignore-user-config', '--skip-git-repo-check'];
   // 첨부한 사진: --image=경로 로 하나씩 넘긴다 (--image 는 값을 여럿 받아서, 띄어 쓰면 마지막 '-'(글은 stdin)까지 사진으로 먹는다)
   for (const img of a.current?.images || []) if (fs.existsSync(img)) opts.push(`--image=${img}`);
-  // 윈도에서는 unelevated 샌드박스를 쓴다. 설정이 없으면 작업 폴더에도 못 쓰고, elevated 는 PowerShell 이 제한 모드라
-  // 한글 출력이 깨지고 명령이 C:\ 에서 시작된다. unelevated 도 작업 폴더 밖 쓰기는 막는다 (2026-10-31 직접 확인).
-  if (process.platform === 'win32') opts.push('-c', 'windows.sandbox=unelevated');
+  // 윈도에서는 켤 때 확인한 샌드박스를 쓴다: mxc(되면) 아니면 unelevated. 설정이 없으면 사용자 설정의 elevated 를 따르는데,
+  // elevated 는 읽기 전용에서 PowerShell 이 제한 모드라 한글 출력이 깨지고 연결도 막지 못한다. 둘 다 작업 폴더 밖 쓰기는 막는다.
+  if (process.platform === 'win32') opts.push('-c', `windows.sandbox=${codex.sandbox || 'unelevated'}`);
   if (a.gptModel) opts.push('-m', a.gptModel);
   if (a.effort) opts.push('-c', `model_reasoning_effort=${a.effort}`);
   return resume
@@ -1298,9 +1311,10 @@ function pump(a) {
     // Codex 에는 붙일 시스템 안내 칸이 없어서, 새 대화의 첫 글 앞에 같은 안내를 붙인다
     // 어느 폴더에서 일하는지 전체 경로로 알려 준다 (그 밖에는 샌드박스가 쓰기를 막는다)
     let where = t('작업 폴더: {dir} (파일은 이 폴더 안에서만 만들고 고칠 수 있어요)', { dir: a.cwd });
-    // 윈도의 읽기 전용 샌드박스에서는 PowerShell 이 제한 모드라 Get-Content 출력의 한글이 깨진다 (파일은 멀쩡하다).
-    // cmd /c type 이나 node 로 읽으면 바이트가 그대로 나온다 (2026-11-20 진짜 Codex 로 확인). 모르면 멀쩡한 파일을 '깨졌다'며 고치게 한다
-    if (process.platform === 'win32' && codexSandbox(a) === 'read-only') {
+    // 윈도의 unelevated 읽기 전용 샌드박스에서는 PowerShell 이 제한 모드라 Get-Content 출력의 한글이 깨진다 (파일은 멀쩡하다).
+    // cmd /c type 이나 node 로 읽으면 바이트가 그대로 나온다 (2026-11-20 진짜 Codex 로 확인). 모르면 멀쩡한 파일을 '깨졌다'며 고치게 한다.
+    // mxc 에서는 깨지지 않아서 이 안내가 필요 없다
+    if (process.platform === 'win32' && codexSandbox(a) === 'read-only' && codex.sandbox !== 'mxc') {
       where += `\n${t('이 PC의 읽기 전용 환경에서는 PowerShell 의 Get-Content 출력에서 한글이 깨져 보여요. 파일 내용은 cmd /c type 파일이름 으로 읽으세요. 그래도 한글이 깨져 보이면 파일이 아니라 출력 문제이니, 그것만으로 파일을 고치게 하지 마세요.')}`;
     }
     if (a.staff) text = `${staffNote(a.staff, true)}\n${where}\n\n${text}`;

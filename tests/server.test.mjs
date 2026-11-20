@@ -229,6 +229,23 @@ test('검사 팀: GPT 테스터만 작업 폴더에 쓸 수 있고, GPT 보안 �
   });
 });
 
+test('GPT: 켤 때 mxc 샌드박스를 쓸 수 있는지 보고, 되면 mxc(이 PC·인터넷 연결이 막힘)로, 안 되면 unelevated 로 돌린다', { skip: !onWindows }, async () => {
+  const gpt = { agents: [{ id: 'a1', name: '일꾼 1', engine: 'codex', permissionMode: 'plan' }] };   // 읽기 전용 샌드박스
+  const line = s => said(s, 'a1').find(x => x.includes('win='));
+  await withServer({ seed: gpt, env: { FAKE_MXC: '1' } }, async srv => {
+    await srv.until(s => s.codex.sandbox === 'mxc', 'mxc 를 쓸 수 있다고 봄');
+    await send(srv, '설정 보기');
+    const s = await srv.until(line, 'GPT 가 답함');
+    assert.match(line(s), /win=mxc type=false/);   // mxc 에서는 한글이 깨지지 않아 cmd /c type 안내가 없다
+  });
+  await withServer({ seed: gpt }, async srv => {
+    await srv.until(s => s.codex.sandbox === 'unelevated', 'mxc 를 못 쓴다고 봄');
+    await send(srv, '설정 보기');
+    const s = await srv.until(line, 'GPT 가 답함');
+    assert.match(line(s), /win=unelevated type=true/);
+  });
+});
+
 test('검사 자리 설정은 다시 켜도 그대로 남는다', async () => {
   const home = tempDir();
   seed(home);

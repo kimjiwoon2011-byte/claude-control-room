@@ -22,6 +22,8 @@ const hold = ms => new Promise(r => setTimeout(r, ms));   // FAKE_FAST 여도 �
 
 if (args[0] === '--version') { console.log('codex-cli 0.166.0 (fake)'); process.exit(0); }
 if (args[0] === 'login' && args[1] === 'status') { process.stderr.write('Logged in using ChatGPT\n'); process.exit(0); }
+// 'codex sandbox … -- 명령': 관제실이 켤 때 mxc 샌드박스를 쓸 수 있는지 본다. FAKE_MXC=1 이면 진짜 mxc 처럼 이 PC 연결이 막힌 척한다
+if (args[0] === 'sandbox') { console.log(process.env.FAKE_MXC === '1' ? 'CR_NET_EACCES' : 'CR_NET_ECONNREFUSED'); process.exit(0); }
 if (args[0] !== 'exec') { process.stderr.write(`fake codex: 모르는 명령 ${args.join(' ')}\n`); process.exit(2); }
 
 const resume = args[1] === 'resume';
@@ -64,7 +66,7 @@ async function run() {
 
   if (prompt.includes('설정 보기')) {
     const images = args.filter(a => a.startsWith('--image=')).map(a => path.basename(a.slice(8)));   // 같이 넘겨받은 사진
-    say(`sandbox=${sandbox} model=${opt('-m') || '-'} effort=${conf('model_reasoning_effort') || '-'} resume=${resume} ignoreUserConfig=${args.includes('--ignore-user-config')} 안내=${/\[(관제실 안내|Control room notice)\]/.test(prompt)} 쪽지=${!!note} images=${images.join(',') || '-'}`);
+    say(`sandbox=${sandbox} win=${conf('windows.sandbox') || '-'} type=${/cmd \/c type/.test(prompt)} model=${opt('-m') || '-'} effort=${conf('model_reasoning_effort') || '-'} resume=${resume} ignoreUserConfig=${args.includes('--ignore-user-config')} 안내=${/\[(관제실 안내|Control room notice)\]/.test(prompt)} 쪽지=${!!note} images=${images.join(',') || '-'}`);
     return done();
   }
   if (note && prompt.includes('쪽지 보기')) {

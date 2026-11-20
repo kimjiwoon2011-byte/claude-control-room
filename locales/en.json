@@ -739,5 +739,7 @@
   "복사한 그림·파일을 첨부하기 (프롬프트 창에 끌어다 놓아도 돼요)": "Attach a copied image or file (or drag it onto the prompt box)",
   "브라우저에서 이 주소를 열어 주세요 (한 번만 쓸 수 있어요): {url}": "Open this address in a browser (it works only once): {url}",
   "이 창에는 열쇠가 없어요": "This window has no key",
-  "관제실을 켤 때처럼 실행.bat(바탕화면의 클로드 관제실)을 다시 눌러 주세요. 열쇠가 든 새 창이 열려요.": "Run 실행.bat (the Claude Control Room shortcut on your desktop) again, just like when you start the app. A new window with the key will open."
+  "관제실을 켤 때처럼 실행.bat(바탕화면의 클로드 관제실)을 다시 눌러 주세요. 열쇠가 든 새 창이 열려요.": "Run 실행.bat (the Claude Control Room shortcut on your desktop) again, just like when you start the app. A new window with the key will open.",
+  "GPT 샌드박스: mxc (이 PC 안 접속과 인터넷을 막아요)": "GPT sandbox: mxc (blocks connections to this PC and the internet)",
+  "GPT 샌드박스: unelevated (이 PC에서는 mxc 를 쓸 수 없어요)": "GPT sandbox: unelevated (mxc isn't available on this PC)"
 }
