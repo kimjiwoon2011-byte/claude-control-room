@@ -2261,6 +2261,9 @@ function serveIndex(res) {
       'Cache-Control': 'no-store',
       'X-Frame-Options': 'DENY',
       'Referrer-Policy': 'no-referrer',
+      // 틀(iframe)에는 미리 보기 서버만: 미리 보는 페이지가 스스로 바깥 주소로 옮겨 가며 내용을 실어 보내지 못하게 한다
+      // (틀 안의 이동도 이 화면의 frame-src 를 따른다). 다른 규칙은 걸지 않는다
+      'Content-Security-Policy': previewPort ? `frame-src http://127.0.0.1:${previewPort} http://localhost:${previewPort}` : "frame-src 'none'",
     });
     // 화면에 열쇠·언어·사전을 심는다. 사전은 한국어가 아닐 때만 넣는다 (</script> 가 섞이지 않게 < 를 바꿔 쓴다)
     const dict = settings.lang === 'ko' ? 'null' : JSON.stringify(DICTS[settings.lang] || {}).replace(/</g, '\\u003c');
@@ -2799,6 +2802,9 @@ function servePreview(req, res) {
   let rel;
   try { rel = decodeURIComponent(m[3]); } catch { return no(); }
   if (!a || rel.includes('\0')) return no();
+  // 파일 시스템에 묻기 전에 글자만으로 먼저 본다: \\서버\… (//서버/…) 경로는 realpath 만 불러도 윈도가 그 서버에 접속해
+  // 로그인 정보가 새고, 이름에 실은 내용이 DNS 로 나가며, 기다리는 동안 서버 전체가 멈춘다
+  if (!inside(path.resolve(a.cwd), path.resolve(a.cwd, rel))) return no();
   try {
     const root = fs.realpathSync(path.resolve(a.cwd));
     let file = fs.realpathSync(path.resolve(root, rel));
@@ -2810,6 +2816,7 @@ function servePreview(req, res) {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
+      'X-DNS-Prefetch-Control': 'off',   // <link rel=dns-prefetch> 로 이름에 실어 내보내는 길 (CSP 가 못 막는다)
     });
     if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);

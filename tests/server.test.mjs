@@ -602,6 +602,25 @@ test('미리 보기: 번호가 틀리거나, 작업 폴더 밖(.. ·정션)이�
       assert.ok(!r.body.includes('SECRET'), p);
     }
     assert.equal((await rawGet(port, `/p/${key}/a1/index.html`, 'evil.example')).status, 403);
+    // \\서버\… 경로는 파일 시스템에 묻기만 해도 윈도가 그 서버에 접속한다 (로그인 정보가 새고, 기다리는 동안 서버가 멈춘다).
+    // 폴더 밖이라는 걸 먼저 알아채고 바로 거절해야 한다. 192.0.2.1 은 아무도 없는 문서용 주소라, 접속하려 들면 한참 걸린다
+    for (const p of [`/p/${key}/a1/%5C%5C192.0.2.1%5Cshare%5Cx.html`, `/p/${key}/a1///192.0.2.1/share/x.html`]) {
+      const t0 = Date.now();
+      assert.equal((await rawGet(port, p)).status, 404, p);
+      assert.ok(Date.now() - t0 < 1500, `${p}: ${Date.now() - t0}ms 걸림 — 네트워크 경로에 접속하려 든 것 같다`);
+    }
+  });
+});
+
+test('미리 보기: 관제실 화면은 미리 보기 서버 말고는 틀(iframe)에 띄우지 못하게 하고, 미리 보는 페이지는 DNS 미리 조회를 끈다', async () => {
+  await withServer(async srv => {
+    fs.writeFileSync(path.join(srv.home, 'work', 'index.html'), 'ok');
+    const s = await srv.until(st => st.app.preview, '미리 보기 서버가 켜짐');
+    const page = await fetch(`${srv.base}/`, { headers: { cookie: srv.cookie } });
+    // 미리 보는 페이지가 스스로 바깥 주소로 옮겨 가며 내용을 실어 보내는 길을 막는다 (틀 안의 이동도 이 규칙을 따른다)
+    assert.equal(page.headers.get('content-security-policy'), `frame-src http://127.0.0.1:${s.app.preview.port} http://localhost:${s.app.preview.port}`);
+    const pv = await fetch(`${previewBase(s)}/a1/index.html`);
+    assert.equal(pv.headers.get('x-dns-prefetch-control'), 'off');
   });
 });
 
