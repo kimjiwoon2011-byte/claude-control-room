@@ -377,6 +377,51 @@ test('보안 기록: 허락·막은 일·위험한 설정 바꾸기·열쇠 없�
   }
 });
 
+test('팀 게시판: 팀장의 약속이 첫 글, 일꾼은 게시판을 받아 일하고 끝나면 [게시판] 소식을 올리며, 뒤 조각은 앞 소식을 받는다 (.team-board.md·결과 모으기에도)', async () => {
+  const seedTeam = { settings: { lead: { enabled: true, approve: false } }, agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] };
+  await withServer({ seed: seedTeam }, async srv => {
+    await srv.api('POST', '/api/send', { text: '할 일 앱 순서대로 만들어 줘', target: 'lead' });
+    const s = await srv.until(st => st.plans[0]?.state === 'done' && idle('lead')(st), '계획 끝남', 30000);
+    const [promise, ...posts] = s.plans[0].board;
+    assert.equal(promise.lead, true);
+    assert.match(promise.text, /saveTodos/);
+    assert.deepEqual(posts.map(b => b.who), ['일꾼 1', '일꾼 2']);
+    assert.match(posts[0].text, /^1번 조각: 버튼 이름은 login \(약속 봄=true, 앞 소식 봄=false\)$/);
+    assert.match(posts[1].text, /^2번 조각: .*약속 봄=true, 앞 소식 봄=true/);   // 뒤 조각은 앞 조각의 소식을 받았다
+    const first = logOf(s, 'a1').find(e => e.k === 'user').text;
+    assert.match(first, /\.team-board\.md/);   // 시작 전·끝내기 전에 게시판 파일을 다시 읽으라는 안내
+    const file = fs.readFileSync(path.join(srv.home, 'work', '.team-board.md'), 'utf8');
+    assert.match(file, /saveTodos/);
+    assert.match(file, /2번 조각/);
+    assert.match(s.plans[0].final, /게시판 봄/);   // 팀장이 최종 보고를 쓸 때 게시판을 받았다
+  });
+});
+
+test('팀 게시판: 감독관이 돌려보내 고친 차례는 [게시판] 을 안 적었으면 올리지 않는다 (게시판이 어지럽지 않게)', async () => {
+  const seedTeam = { settings: { lead: { enabled: true, approve: false }, supervisor: { enabled: true } }, agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] };
+  await withServer({ seed: seedTeam }, async srv => {
+    await srv.api('POST', '/api/send', { text: '할 일 앱 만들어 줘', target: 'lead' });
+    const s = await srv.until(st => st.plans[0]?.state === 'done' && STAFF_IDLE.every(id => idle(id)(st)), '계획 끝남', 40000);
+    // 가짜 감독관은 처음엔 고칠 점을 찾아 돌려보낸다 — 고친 차례의 답('고쳤어요.')은 올라가지 않는다
+    assert.deepEqual(s.plans[0].board.slice(1).map(b => b.who).sort(), ['일꾼 1', '일꾼 2']);   // 두 조각은 동시에 돌아 끝나는 차례가 그때그때 다르다
+    assert.ok(s.plans[0].board.every(b => !b.auto));
+  });
+});
+
+test('팀 게시판: [게시판] 을 안 적은 답은 첫 줄을 자동 요약으로 올린다', async () => {
+  const seedTeam = { settings: { lead: { enabled: true, approve: false } }, agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] };
+  await withServer({ seed: seedTeam }, async srv => {
+    await srv.api('POST', '/api/send', { text: '할 일 앱 게시판 없이 만들어 줘', target: 'lead' });   // 가짜 일꾼이 [게시판] 을 안 적는다
+    const s = await srv.until(st => st.plans[0]?.state === 'done' && idle('lead')(st), '계획 끝남', 30000);
+    const posts = s.plans[0].board.slice(1);
+    assert.deepEqual(posts.map(b => b.who).sort(), ['일꾼 1', '일꾼 2']);   // 두 조각은 동시에 돌아 끝나는 차례가 그때그때 다르다
+    for (const b of posts) {
+      assert.equal(b.auto, true);
+      assert.match(b.text, /^고쳤어요\./);
+    }
+  });
+});
+
 test('검사 자리 설정은 다시 켜도 그대로 남는다', async () => {
   const home = tempDir();
   seed(home);

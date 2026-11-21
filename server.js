@@ -1308,6 +1308,12 @@ function endTurn(a, { status, text = '', ev = null }) {
   }
   const pt = cur.planTask;
   if (pt) planTaskPatch(pt, { result: String(text || '').slice(0, 3000) });
+  if (pt && status === 'done') {   // 팀 게시판에 이 일꾼의 소식을 올린다
+    const plan = plans.find(x => x.id === pt.planId);
+    const post = plan && boardFromReply(text);
+    // 검사하는 자리가 돌려보내 고친 차례는 [게시판] 을 직접 적었을 때만 올린다 ('고쳤어요' 같은 자동 요약은 게시판만 어지럽힌다)
+    if (post && !(post.auto && cur.round)) boardPost(plan, { who: a.name, color: a.color, ...post });
+  }
   if (status === 'done') {
     const reviewing = requestReview(a, cur, text);
     if (pt) { if (reviewing) planTaskPatch(pt, { state: 'reviewing' }); else planTaskEnd(pt, 'done'); }
@@ -2013,8 +2019,9 @@ function leadPrompt(p, phase) {
       t('- 각 조각은 그 일꾼이 다른 설명 없이 바로 할 수 있게, 만들 파일과 지킬 것을 구체적으로 적으세요.'),
       t('- 지금 폴더의 파일을 읽어 봐도 되지만, 고칠 수는 없어요.'),
       t('- 어떤 조각이 다른 조각이 만든 파일을 써야 한다면(예: 기능을 만든 뒤에 그 기능의 시험 돌리기) after 에 먼저 끝나야 할 조각 번호를 적으세요. 조각 번호는 tasks 의 순서대로 1부터이고, 앞 번호만 적을 수 있어요. 기다릴 필요가 없으면 after 를 빈 칸([])으로 두세요. 기다리는 조각은 앞 조각이 검사까지 끝난 뒤에 시작해서 그만큼 늦어지니, 꼭 필요할 때만 쓰세요.'),
+      t('- 조각들이 서로 맞물리게, 일꾼들이 함께 지킬 약속(파일 구조, 함수·데이터 이름과 모양, 꼭 지킬 것)을 promises 에 짧게 적으세요. 팀 게시판 맨 위에 올라가서 모든 일꾼이 봐요.'),
       '', t('짧게 설명한 뒤 마지막 줄에 아래 형식의 JSON 한 줄만 적으세요. worker 에는 위 일꾼 이름을 그대로 적으세요.'),
-      t('{"plan":"계획 한두 문장","tasks":[{"worker":"일꾼 이름","task":"맡길 일","after":[]}]}'),
+      t('{"plan":"계획 한두 문장","promises":"일꾼들이 함께 지킬 약속","tasks":[{"worker":"일꾼 이름","task":"맡길 일","after":[]}]}'),
     ].join('\n');
   }
   return [
@@ -2028,6 +2035,7 @@ function leadPrompt(p, phase) {
       ...(x.review ? [`${t('검사:')} ${x.review}`] : []),
       `${t('일꾼의 마지막 보고:')} ${String(x.result || t('(없음)')).slice(0, 1500)}`,
     ]),
+    ...(p.board?.length ? ['', t('## 팀 게시판 (약속과 일꾼들의 소식)'), ...boardLines(p), t('약속이 지켜졌는지, 게시판의 부탁이 처리됐는지도 확인하세요.')] : []),
     '', t('지금 폴더의 파일을 직접 읽어서 일꾼들의 결과가 서로 잘 맞는지(이름·연결·빠진 부분) 확인하세요.'),
     t('보고에는 무엇이 됐는지, 남은 문제, 사용자가 해야 할 일을 짧게 적으세요. JSON 은 쓰지 마세요.'),
   ].join('\n');
@@ -2045,7 +2053,13 @@ function parsePlan(text) {
       const tasks = Array.isArray(v.tasks) ? v.tasks.filter(x => x && typeof x.task === 'string' && x.task.trim()).slice(0, MAX_AGENTS) : [];
       // after: 먼저 끝나야 할 조각 번호(1부터). 자기보다 앞 번호만 받아서 서로 기다리다 멈추는 일이 없게 한다
       const before = (x, i) => [...new Set((Array.isArray(x.after) ? x.after : []).map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= i))];
-      if (tasks.length) return { plan: String(v.plan || '').slice(0, 600), tasks: tasks.map((x, i) => ({ worker: String(x.worker || '').trim(), task: x.task.trim().slice(0, 4000), after: before(x, i) })) };
+      if (tasks.length) {
+        return {
+          plan: String(v.plan || '').slice(0, 600),
+          promises: typeof v.promises === 'string' ? v.promises.trim().slice(0, 1500) : '',
+          tasks: tasks.map((x, i) => ({ worker: String(x.worker || '').trim(), task: x.task.trim().slice(0, 4000), after: before(x, i) })),
+        };
+      }
     } catch { /* 다음 줄 */ }
   }
   return null;
@@ -2084,7 +2098,9 @@ function finishLead(ref, status, text) {
     return { id: newId(), workerId: a.id, workerName: a.name, color: a.color, text: x.task, state: 'waiting', result: '', review: '', after: [] };
   });
   parsed.tasks.forEach((x, i) => { tasks[i].after = x.after.map(n => tasks[n - 1].id); });
-  markPlan(p.id, { state: 'proposed', plan: parsed.plan, tasks });
+  // 팀 게시판: 팀장의 약속이 첫 글이다
+  const board = parsed.promises ? [{ who: staff.lead.name, color: staff.lead.color, lead: true, text: parsed.promises, at: Date.now() }] : [];
+  markPlan(p.id, { state: 'proposed', plan: parsed.plan, tasks, board });
   addLog(staff.lead, { k: 'sys', text: t('계획을 세웠어요: 일꾼 {n}명에게 {m}개 조각', { n: used.size, m: tasks.length }) });
   if (!settings.lead.approve) startPlan(p);
 }
@@ -2092,6 +2108,7 @@ function finishLead(ref, status, text) {
 // 계획을 시작한다: 기다릴 앞 조각이 없는 조각은 바로 맡기고, 있는 조각은 'blocked' 로 두었다가 앞 조각이 끝나면 맡긴다
 function startPlan(p) {
   markPlan(p.id, { state: 'running', note: '' });
+  writeBoardFile(p);   // 일꾼들이 시작하기 전에 게시판 파일부터 만들어 둔다
   for (const x of p.tasks) x.state = x.after?.length ? 'blocked' : x.state;
   for (const x of p.tasks) if (x.state !== 'blocked') queueTask(p, x);
   markPlan(p.id, {});
@@ -2109,11 +2126,56 @@ function queueTask(p, x) {
     '', `${t('전체 목표:')} ${p.request.slice(0, 1500)}`,
     ...(done.length ? ['', t('먼저 끝난 조각 (이 결과 위에서 이어서 하세요):'), ...done] : []),
     ...(others.length ? ['', t('같이 하는 일꾼 (이 일꾼들이 맡은 파일은 건드리지 마세요):'), ...others] : []),
+    '', t('## 팀 게시판 (팀장의 약속과 일꾼들의 소식)'),
+    ...(p.board?.length ? boardLines(p) : [t('(아직 글이 없어요)')]),
+    t('- 시작하기 전과 끝내기 전에 작업 폴더의 {file} 을 한 번 더 읽어, 그사이 올라온 소식과 부탁을 확인하세요. 관제실이 쓰는 파일이라 고치지 마세요.', { file: BOARD_FILE }),
+    t('- 약속은 꼭 지키세요. 끝나면 답 마지막에 [게시판] 한 줄을 쓰고, 그 아래에 다른 일꾼에게 알릴 것(한 일, 정한 이름·파일, 부탁)을 3줄 안으로 적으세요.'),
   ].join('\n');
   a.queue.push({ id: newId(), text, planTask: ref });
   x.state = 'queued';
   sendAgent(a);
   pump(a);
+}
+
+// ── 팀 게시판 ──
+// 계획마다 하나: 팀장의 약속(첫 글)과 일꾼들이 끝낼 때 올리는 소식. AI 를 더 부르지 않는다 — 일을 맡길 때 글에 넣고,
+// 관제실이 일꾼들 작업 폴더의 .team-board.md 에도 써 둔다 (일꾼은 읽기만 해서 서로 덮어쓰지 않는다)
+const BOARD_FILE = '.team-board.md';
+const BOARD_MAX = 40;
+const boardLines = p => (p.board || []).map(b => `- ${b.who}${b.lead ? ` (${t('약속')})` : ''}: ${b.text.replace(/\s*\n\s*/g, ' / ')}`);
+
+// 일꾼 답의 마지막 [게시판] 줄 아래를 소식으로 쓴다. 없으면 답의 첫 두 줄을 자동 요약으로
+function boardFromReply(text) {
+  const lines = String(text || '').split('\n');
+  let at = -1;
+  lines.forEach((l, i) => { if (/^\[(게시판|Board)\]/i.test(l.trim())) at = i; });
+  if (at >= 0) {
+    const rest = [lines[at].trim().replace(/^\[(게시판|Board)\]\s*/i, ''), ...lines.slice(at + 1)].join('\n').trim();
+    if (rest) return { text: rest.slice(0, 800), auto: false };
+  }
+  const head = lines.map(l => l.trim()).filter(Boolean).slice(0, 2).join('\n');
+  return head ? { text: head.slice(0, 300), auto: true } : null;
+}
+
+function boardPost(p, post) {
+  p.board = p.board || [];
+  p.board.push({ ...post, at: Date.now() });
+  while (p.board.length > BOARD_MAX) p.board.splice(p.board[0]?.lead ? 1 : 0, 1);   // 오래된 소식부터 버리고, 약속은 남긴다
+  writeBoardFile(p);
+  markPlan(p.id, {});
+}
+
+function writeBoardFile(p) {
+  const text = [
+    `# ${t('팀 게시판')} — ${firstLine(p.request).slice(0, 80)}`,
+    t('(관제실이 쓰는 파일이에요. 읽기만 하고 고치지 마세요.)'),
+    '', ...(p.board?.length ? (p.board || []).map(b => `- [${new Date(b.at).toTimeString().slice(0, 5)}] ${b.who}${b.lead ? ` (${t('약속')})` : ''}: ${b.text.replace(/\n/g, '\n  ')}`) : [t('(아직 글이 없어요)')]),
+    '',
+  ].join('\n');
+  const dirs = new Set(p.tasks.map(x => agents.find(a => a.id === x.workerId)?.cwd).filter(Boolean));
+  for (const dir of dirs) {
+    try { if (isDir(dir) && !riskyCwd(dir)) fs.writeFileSync(path.join(dir, BOARD_FILE), text); } catch { /* 못 써도 글로는 받는다 */ }
+  }
 }
 
 // 앞 조각이 모두 끝난 조각을 맡긴다. 앞 조각 중 하나라도 끝나지 못했으면(오류·중단) 그 조각도 시작하지 않는다

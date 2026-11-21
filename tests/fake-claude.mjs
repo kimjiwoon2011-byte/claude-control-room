@@ -166,15 +166,15 @@ async function work(prompt) {
   if (/^\[(계획 요청|Plan request)\]/.test(prompt)) {
     const names = [...prompt.matchAll(/^- ([^·\n]+?) · /gm)].map(m => m[1]).slice(0, 2);
     const request = (/## (?:사용자가 시킨 일|Task the user gave)\n([\s\S]*?)\n\n/.exec(prompt) || [])[1] || '';   // 규칙 글이 아니라 사용자가 시킨 일만 본다
-    const job = request.includes('기다려') ? '기다려' : request.includes('고장') ? '고장' : '빠르게';
-    const plan = { plan: `${names.length}명에게 나눠 맡겨요.`, tasks: names.map((worker, i) => ({ worker, task: `${job} ${i + 1}번 조각 만들어 줘` })) };
+    const job = request.includes('기다려') ? '기다려' : request.includes('고장') ? '고장' : request.includes('게시판 없이') ? '빠르게 게시판없이' : '빠르게';
+    const plan = { plan: `${names.length}명에게 나눠 맡겨요.`, promises: '저장 함수는 saveTodos(todos) 로 맞춰요', tasks: names.map((worker, i) => ({ worker, task: `${job} ${i + 1}번 조각 만들어 줘` })) };
     if (request.includes('순서') && plan.tasks[1]) plan.tasks[1].after = [1];   // 둘째 조각은 첫째 조각이 끝난 뒤에
     const text = `계획을 세웠어요.\n${JSON.stringify(plan)}`;
     await say(text);
     return ok(text, { input_tokens: 300, output_tokens: 80 });
   }
   if (/^\[(결과 모으기|Collect results)\]/.test(prompt)) {
-    const text = '최종 보고: 모두 끝났어요.';
+    const text = `최종 보고: 모두 끝났어요.${prompt.includes('saveTodos') ? ' (게시판 봄)' : ''}`;
     await say(text);
     return ok(text, { input_tokens: 300, output_tokens: 60 });
   }
@@ -186,6 +186,9 @@ async function work(prompt) {
     await say('바로 고칠게요.');
     await tool('Edit', { file_path: file, old_string: '<button>', new_string: '<button class="login">' }, 'The file has been updated.');
     await say('고쳤어요.');
+    // 팀장이 나눈 조각이면 팀 게시판에 소식을 올린다 (받은 글에 약속·앞 조각 소식이 들어 있었는지도 같이 적는다)
+    const piece = /\[(?:팀장이 나눈 일|Task) (\d+)\/\d+/.exec(prompt);
+    if (piece && !prompt.includes('게시판없이')) return ok(`고쳤어요.\n[게시판]\n${piece[1]}번 조각: 버튼 이름은 login (약속 봄=${prompt.includes('saveTodos')}, 앞 소식 봄=${/1번 조각: 버튼/.test(prompt)})`);
     return ok('고쳤어요.');
   }
   if (prompt.includes('기다려')) {

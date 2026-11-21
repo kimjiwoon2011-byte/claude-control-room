@@ -708,6 +708,15 @@
   .pt-state.left, .pt-state.error { color: #ff9b9b; }
   .pt-state.working, .pt-state.fixing, .pt-state.reviewing { color: var(--accent-hi); }
   .plan-final { padding: 8px 10px; max-height: 240px; overflow: auto; background: #070707; border: 1px solid var(--line); border-radius: 7px; color: var(--text); }
+  /* 팀 게시판: 팀장의 약속(맨 위)과 일꾼들의 소식 */
+  .plan-board { display: grid; gap: 4px; max-height: 260px; overflow: auto; padding: 8px 10px; border: 1px dashed var(--line-2); border-radius: 7px; }
+  .pb-head { font-size: 11.5px; color: var(--dim); }
+  .pb-post { display: grid; grid-template-columns: minmax(0, 120px) minmax(0, 1fr); gap: 8px; font-size: 12.5px; line-height: 1.5; }
+  .pb-post.lead { padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .pb-who { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pb-text { color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pb-tag { padding: 0 5px; border: 1px solid #b58cff; border-radius: 4px; font-size: 10.5px; color: #cdb3ff; }
+  .pb-tag.auto { border-color: var(--line-2); color: var(--dim); }
   .plan-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .plan-foot .rep-time { margin-left: auto; }
   .sup-off {
@@ -2800,6 +2809,9 @@ function planHTML(p) {
       const wait = after.length ? `<span class="pt-after">${t('{n}번 뒤', { n: after.join(', ') })}</span>` : '';
       return `<li style="--c:${esc(x.color)}"><span class="pt-n">${i + 1}</span><span class="dot"></span><span class="who">${esc(x.workerName)}</span><span class="pt-text" title="${esc(x.text)}">${wait}${esc(firstLine(x.text))}</span><span class="pt-state ${esc(x.state)}">${tg} ${tl}</span></li>`;
     }).join('')}</ol>` : ''}
+    ${p.board?.length ? `<div class="plan-board"><div class="pb-head">${t('팀 게시판')}</div>${p.board.map(b => `
+      <div class="pb-post${b.lead ? ' lead' : ''}" style="--c:${esc(b.color || '#888')}"><span class="pb-who"><span class="dot"></span>${esc(b.who)}${b.lead ? ` <span class="pb-tag">${t('약속')}</span>` : ''}${b.auto ? ` <span class="pb-tag auto">${t('자동 요약')}</span>` : ''}</span><span class="pb-text">${esc(b.text)}</span></div>`).join('')}
+    </div>` : ''}
     ${p.final ? `<div class="plan-final">${fmt(p.final)}</div>` : ''}
     ${p.note ? `<p class="rep-note">${esc(p.note)}</p>` : ''}
     <div class="plan-foot">${buttons}<span class="rep-time">${timeText(p.updatedAt || p.at)}</span></div>
