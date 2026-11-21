@@ -246,6 +246,82 @@ test('GPT: 켤 때 mxc 샌드박스를 쓸 수 있는지 보고, 되면 mxc(이 
   });
 });
 
+test('GPT(mxc): 로그인·열쇠 파일과 관제실 기록 폴더는 읽지도 못하게 막는다 (mxc 가 아니면 이 기능이 없어 그대로)', { skip: !onWindows }, async () => {
+  // 사용자 폴더를 임시 폴더로 바꿔서, 진짜 로그인 파일 대신 가짜를 두고 본다
+  const fake = tempDir();
+  const appData = path.join(fake, 'AppData', 'Roaming');
+  const secrets = [path.join(fake, '.codex', 'auth.json'), path.join(fake, '.claude', '.credentials.json')];
+  for (const f of secrets) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, '{}'); }
+  fs.mkdirSync(path.join(appData, 'claude-code-router'), { recursive: true });
+  const slash = p => JSON.stringify(p.split(path.sep).join('/'));
+  const gpt = { agents: [{ id: 'a1', name: '일꾼 1', engine: 'codex', permissionMode: 'plan' }] };
+  const line = s => said(s, 'a1').find(x => x.includes('perm='));
+  try {
+    await withServer({ seed: gpt, env: { FAKE_MXC: '1', USERPROFILE: fake, HOME: fake, APPDATA: appData } }, async srv => {
+      await srv.until(s => s.codex.sandbox === 'mxc', 'mxc 를 쓸 수 있다고 봄');
+      await send(srv, '설정 보기');
+      const s = await srv.until(line, 'GPT 가 답함');
+      assert.match(line(s), /^sandbox=read-only win=mxc /);   // -s 대신 권한 묶음으로 받아도 읽기 전용 그대로
+      assert.match(line(s), /perm="cr"/);
+      for (const p of [...secrets, path.join(appData, 'claude-code-router'), path.join(srv.home, 'data')]) assert.ok(line(s).includes(`${slash(p)}="deny"`), p);
+      assert.ok(!line(s).includes('.ssh'));   // 없는 곳은 넣지 않는다
+    });
+    await withServer({ seed: gpt, env: { USERPROFILE: fake, HOME: fake, APPDATA: appData } }, async srv => {
+      await srv.until(s => s.codex.sandbox === 'unelevated', 'mxc 를 못 쓴다고 봄');
+      await send(srv, '설정 보기');
+      const s = await srv.until(line, 'GPT 가 답함');
+      assert.match(line(s), /^sandbox=read-only win=unelevated .* perm=- deny=-$/);
+    });
+  } finally {
+    removeDir(fake);
+  }
+});
+
+test('위험한 작업 폴더(드라이브 맨 위·사용자 폴더 전체·관제실 앱이나 기록 폴더를 품은 곳·기록 폴더 안)는 고를 수 없고, 저장돼 있던 곳이면 일을 시작하지 않는다', async () => {
+  await withServer(async srv => {
+    const data = path.join(srv.home, 'data');
+    fs.mkdirSync(path.join(data, 'sub'), { recursive: true });
+    const bad = [path.parse(srv.home).root, os.homedir(), ROOT, path.dirname(ROOT), data, path.join(data, 'sub'), srv.home];
+    for (const dir of bad) {
+      assert.equal((await srv.raw('PATCH', '/api/agents/a1', { cwd: dir })).status, 400, `일꾼 폴더 ${dir}`);
+      assert.equal((await srv.raw('POST', '/api/settings', { defaultCwd: dir })).status, 400, `기본 폴더 ${dir}`);
+      assert.equal((await srv.raw('POST', '/api/setup', { defaultCwd: dir })).status, 400, `처음 설정 ${dir}`);
+    }
+    const ok = path.join(srv.home, 'ok');
+    fs.mkdirSync(ok);
+    assert.equal((await srv.raw('PATCH', '/api/agents/a1', { cwd: ok })).status, 200);
+  });
+  const home = tempDir();
+  seed(home, { agents: [{ id: 'a1', name: '일꾼 1', cwd: path.join(home, 'data') }] });
+  const srv = await startServer({ home });
+  try {
+    await send(srv, '빠르게 고쳐 줘');
+    const s = await srv.until(st => logOf(st, 'a1').some(e => e.k === 'err'), '일을 시작하지 않고 알림');
+    assert.match(logOf(s, 'a1').find(e => e.k === 'err').text, /기록 폴더/);
+    assert.ok(!logOf(s, 'a1').some(e => e.k === 'user'));
+  } finally {
+    await srv.stop();
+    removeDir(home);
+  }
+});
+
+test('claude 위치는 claude 실행 파일만, 작업 폴더 밖에서만 / 대체 AI 주소는 이 PC 만 고를 수 있다', async () => {
+  await withServer(async srv => {
+    const bin = path.join(srv.home, 'bin');
+    fs.mkdirSync(bin);
+    const file = (dir, name) => { const f = path.join(dir, name); fs.writeFileSync(f, ''); return f; };
+    const set = b => srv.raw('POST', '/api/settings', b).then(r => r.status);
+    assert.equal(await set({ claudePath: file(bin, 'evil.exe') }), 400);   // claude 가 아닌 프로그램
+    assert.equal(await set({ claudePath: file(path.join(srv.home, 'work'), 'claude.exe') }), 400);   // GPT 가 쓸 수 있는 작업 폴더 안
+    assert.equal(await set({ claudePath: file(bin, 'claude.exe') }), 200);
+    assert.equal(await set({ claudePath: '' }), 200);   // 비우면 다시 저절로 찾는다
+    assert.equal(await set({ fallbackUrl: 'http://evil.example:3456' }), 400);   // 시킨 일과 CCR 열쇠가 그 서버로 간다
+    assert.equal(await set({ fallbackUrl: 'https://127.0.0.1.evil.example/' }), 400);
+    assert.equal(await set({ fallbackUrl: 'http://localhost:3456' }), 200);
+    assert.equal(await set({ fallbackUrl: 'http://127.0.0.1:3456' }), 200);
+  });
+});
+
 test('검사 자리 설정은 다시 켜도 그대로 남는다', async () => {
   const home = tempDir();
   seed(home);

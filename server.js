@@ -121,6 +121,23 @@ let seq = 0;
 const newId = () => Date.now().toString(36) + (++seq).toString(36) + crypto.randomBytes(2).toString('hex');
 const clock = () => new Date().toTimeString().slice(0, 8);
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+const isFile = p => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+const inside = (root, p) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };   // p 가 root 안(같은 곳 포함)인지
+const real = p => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };   // 정션·바로가기를 따라간 진짜 위치
+
+// 작업 폴더로 쓰면 위험한 곳이면 그 이유를, 괜찮으면 null. GPT 는 작업 폴더 안에 마음대로 쓰고, Claude 도 '파일 수정은 알아서'면 묻지 않고 고친다:
+// 드라이브 맨 위·사용자 폴더 전체면 PC 곳곳을 고칠 수 있고, 관제실 앱 폴더를 품으면 server.js 를 고쳐 다음에 켤 때 샌드박스 밖에서 돌게 할 수 있으며,
+// 기록 폴더는 CCR 열쇠와 모든 대화 기록이 든 곳이다 (안쪽의 하위 폴더는 괜찮다: 예) 관제실 폴더 안의 작업실)
+function riskyCwd(dir) {
+  const d = real(dir);
+  if (path.relative(d, path.parse(d).root) === '') return t('드라이브 맨 위 폴더');
+  if (path.relative(d, real(os.homedir())) === '') return t('사용자 폴더 전체');
+  if (inside(d, real(ROOT))) return t('관제실 앱 폴더를 품은 폴더');
+  const data = real(DATA_DIR);
+  if (inside(d, data) || inside(data, d)) return t('관제실 기록 폴더');
+  return null;
+}
+const riskyText = (dir, why) => t('작업 폴더로 쓸 수 없는 곳이에요: {dir} ({why})', { dir, why });
 const firstLine = s => String(s || '').split('\n')[0];
 const toolKo = name => (TOOL_KO[name] ? t(TOOL_KO[name]) : name || t('도구'));
 const statusKo = s => (STATUS_KO[s] ? t(STATUS_KO[s]) : s);
@@ -631,9 +648,31 @@ function codexArgs(a, resume) {
   if (process.platform === 'win32') opts.push('-c', `windows.sandbox=${codex.sandbox || 'unelevated'}`);
   if (a.gptModel) opts.push('-m', a.gptModel);
   if (a.effort) opts.push('-c', `model_reasoning_effort=${a.effort}`);
+  const sb = codexSandbox(a);
+  const mode = codex.sandbox === 'mxc' ? codexProfile(sb) : null;
   return resume
-    ? ['exec', 'resume', a.codexThread, ...opts, '-c', `sandbox_mode=${codexSandbox(a)}`, '-']
-    : ['exec', ...opts, '-s', codexSandbox(a), '-C', a.cwd, '-'];
+    ? ['exec', 'resume', a.codexThread, ...opts, ...(mode || ['-c', `sandbox_mode=${sb}`]), '-']
+    : ['exec', ...opts, ...(mode || ['-s', sb]), '-C', a.cwd, '-'];
+}
+
+// mxc 에서는 -s 대신 Codex 의 권한 묶음(permissions)으로 샌드박스를 정하고, 로그인·열쇠 파일과 관제실 기록 폴더는 읽지도 못하게 막는다.
+// 읽기 금지는 mxc(와 elevated)에서만 된다 — unelevated 는 받지 않고 실행을 거부해서 거기서는 쓰지 않는다 (2026-11-21 Codex 0.167 로 확인).
+// mxc 는 폴더 권한(ACL)을 바꾸지 않고 막으며, 사용자 본인은 그대로 읽을 수 있다
+function codexProfile(sb) {
+  const deny = secretPaths().map(p => `${JSON.stringify(p.split(path.sep).join('/'))}="deny"`).join(',');
+  return ['-c', 'default_permissions="cr"', '-c', `permissions.cr.extends="${sb === 'read-only' ? ':read-only' : ':workspace'}"`,
+    ...(deny ? ['-c', `permissions.cr.filesystem={${deny}}`] : [])];
+}
+
+// GPT 가 읽지 못하게 막을 곳 (있는 것만): Claude·Codex 로그인, SSH·git·클라우드·npm 열쇠, CCR 설정(바깥 AI 열쇠), 관제실 기록 폴더(CCR 열쇠·대화 기록)
+function secretPaths() {
+  const h = os.homedir();
+  const appData = process.env.APPDATA || path.join(h, 'AppData', 'Roaming');
+  return [
+    path.join(h, '.claude', '.credentials.json'), path.join(h, '.claude.json'), path.join(h, '.codex', 'auth.json'),
+    path.join(h, '.ssh'), path.join(h, '.git-credentials'), path.join(h, '.aws'), path.join(h, '.azure'), path.join(h, '.npmrc'),
+    path.join(appData, 'claude-code-router'), DATA_DIR,
+  ].filter(p => fs.existsSync(p));
 }
 
 // 윈도에서 Codex 는 명령을 powershell.exe -Command "..." 로 감싸서 돌리니, 화면에는 안쪽 명령만 보여 준다
@@ -1250,7 +1289,9 @@ function pump(a) {
     ? (!codex.path ? t('GPT(Codex) 프로그램을 찾지 못했어요. Codex 앱을 깔거나 설정 창에서 다시 찾아 주세요.')
       : codex.loggedIn === false ? t('Codex 로그인이 필요해요. Codex 앱이나 명령창(codex login)에서 ChatGPT 로 로그인해 주세요.') : null)
     : (!claude.path ? t('claude 를 찾지 못했어요. 설정 창에서 claude 위치를 확인해 주세요.') : null))
-    || (!isDir(a.cwd) ? t('작업 폴더가 없어요: {dir}\n에이전트 관리 창에서 폴더를 다시 골라 주세요.', { dir: a.cwd }) : null);
+    || (!isDir(a.cwd) ? t('작업 폴더가 없어요: {dir}\n에이전트 관리 창에서 폴더를 다시 골라 주세요.', { dir: a.cwd }) : null)
+    // 예전에 저장해 둔 위험한 폴더면 시작하지 않는다 (지금은 고를 때 막는다)
+    || (riskyCwd(a.cwd) ? `${riskyText(a.cwd, riskyCwd(a.cwd))}\n${t('에이전트 관리 창에서 다른 폴더를 골라 주세요.')}` : null);
   if (problem) {
     a.queue = [];
     addLog(a, { k: 'err', text: problem });
@@ -1345,7 +1386,7 @@ function pump(a) {
 
 const limitUntil = () => limit.until || limit.at + LIMIT_GUESS_MS;
 const limitActive = () => limit.hit && Date.now() < limitUntil();
-const fallbackReady = () => !!settings.fallbackEnabled && /^https?:\/\/\S+$/i.test(settings.fallbackUrl || '');
+const fallbackReady = () => !!settings.fallbackEnabled && LOCAL_URL.test(settings.fallbackUrl || '');   // 예전에 저장한 바깥 주소면 쓰지 않는다
 
 function setLimit(until) {
   limit = until === null ? { hit: false, until: 0, at: 0 } : { hit: true, until, at: Date.now() };
@@ -2490,6 +2531,8 @@ function apiUpdate(a, b) {
   if (typeof b.cwd === 'string' && b.cwd.trim()) {
     const dir = path.resolve(b.cwd.trim());
     if (!isDir(dir)) return fail(400, t('그 폴더가 없어요: {dir}', { dir }));
+    const why = riskyCwd(dir);
+    if (why) return fail(400, riskyText(dir, why));
     a.cwd = dir;
   }
   if (typeof b.name === 'string' && b.name.trim()) a.name = b.name.trim().slice(0, 20);
@@ -2556,6 +2599,8 @@ function apiSetup(b) {
   }
   if (typeof b.defaultCwd === 'string' && b.defaultCwd.trim()) {
     const dir = path.resolve(b.defaultCwd.trim());
+    const why = riskyCwd(dir);
+    if (why) return fail(400, riskyText(dir, why));
     try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 아래에서 알려 준다 */ }
     if (!isDir(dir)) return fail(400, t('그 폴더를 만들 수 없어요: {dir}', { dir }));
     const before = settings.defaultCwd;
@@ -2574,6 +2619,8 @@ function apiSettings(b) {
   if (typeof b.defaultCwd === 'string' && b.defaultCwd.trim()) {
     const dir = path.resolve(b.defaultCwd.trim());
     if (!isDir(dir)) return fail(400, t('그 폴더가 없어요: {dir}', { dir }));
+    const why = riskyCwd(dir);
+    if (why) return fail(400, riskyText(dir, why));
     settings.defaultCwd = dir;
   }
   applyDefaults({
@@ -2601,7 +2648,8 @@ function apiSettings(b) {
   const fbBefore = JSON.stringify([settings.fallbackEnabled, settings.fallbackUrl, settings.fallbackKey, settings.fallbackModels]);
   if (typeof b.fallbackUrl === 'string') {
     const url = b.fallbackUrl.trim() || DEFAULT_SETTINGS.fallbackUrl;
-    if (!/^https?:\/\/\S+$/i.test(url)) return fail(400, t('게이트웨이 주소는 http:// 로 시작해야 해요'));
+    // 대체 AI 게이트웨이(CCR)는 이 PC 에서 돈다. 바깥 주소면 시킨 일과 CCR 열쇠가 그 서버로 간다
+    if (!LOCAL_URL.test(url)) return fail(400, t('게이트웨이 주소는 이 PC의 http:// 주소(127.0.0.1 또는 localhost)여야 해요'));
     settings.fallbackUrl = url.replace(/\/+$/, '');
   }
   if (typeof b.fallbackKey === 'string') settings.fallbackKey = b.fallbackKey.trim();
@@ -2615,6 +2663,16 @@ function apiSettings(b) {
     ensureCcr();
   }
   const pathChanged = typeof b.claudePath === 'string' && b.claudePath.trim() !== settings.claudePath;
+  if (pathChanged && b.claudePath.trim()) {
+    // 관제실이 샌드박스 없이 돌리는 프로그램이다: claude 실행 파일만, 그리고 에이전트(특히 GPT)가 쓸 수 있는 작업 폴더 밖의 것만 받는다
+    const file = real(b.claudePath.trim());
+    if (!/^claude(\.exe)?$/i.test(path.basename(file)) && !/[\\/]@anthropic-ai[\\/]claude-code[\\/]cli\.m?js$/i.test(file)) {
+      return fail(400, t('claude 위치에는 claude 실행 파일(claude.exe 나 @anthropic-ai/claude-code 의 cli.js)만 고를 수 있어요'));
+    }
+    if ([settings.defaultCwd, ...allAgents().map(a => a.cwd)].some(d => d && inside(real(d), file))) {
+      return fail(400, t('에이전트 작업 폴더 안의 프로그램은 claude 위치로 고를 수 없어요'));
+    }
+  }
   if (pathChanged) settings.claudePath = b.claudePath.trim();
   broadcast({ type: 'settings', settings });
   if (pathChanged) detectClaude();
@@ -2713,6 +2771,7 @@ async function route(method, p, b) {
 }
 
 const LOCAL_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;   // 내 PC 주소로 온 요청만 받는다 (관제실·미리 보기 서버 둘 다)
+const LOCAL_URL = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/\S*)?$/i;   // 이 PC 안의 주소 (대체 AI 게이트웨이)
 
 async function handle(req, res) {
   // DNS 리바인딩 공격 막기: 내 PC 주소로 들어온 요청만 받는다
@@ -2777,8 +2836,6 @@ const PREVIEW_CSP = [
   `connect-src 'self'`, `form-action 'self'`, `frame-src 'self'`, `base-uri 'self'`,
 ].join('; ');
 
-const isFile = p => { try { return fs.statSync(p).isFile(); } catch { return false; } };
-const inside = (root, p) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };
 
 // 이번 일에서 보여 줄 웹 페이지 (작업 폴더 기준 경로, '/' 로). 마지막으로 고친 .html 을 고르고, 없으면 고친 파일 옆의 index.html.
 function previewOf(a, cur) {

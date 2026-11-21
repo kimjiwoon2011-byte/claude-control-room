@@ -30,7 +30,8 @@ const resume = args[1] === 'resume';
 const threadId = resume ? args[2] : randomUUID();
 const opt = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
 const conf = key => args.map((a, i) => (args[i - 1] === '-c' && a.startsWith(`${key}=`) ? a.slice(key.length + 1) : null)).find(Boolean) || null;
-const sandbox = opt('-s') || conf('sandbox_mode') || 'read-only';
+const ext = conf('permissions.cr.extends');   // mxc 에서는 -s 대신 권한 묶음(permissions)으로 샌드박스를 받는다
+const sandbox = opt('-s') || conf('sandbox_mode') || (ext ? (ext.includes('read-only') ? 'read-only' : 'workspace-write') : null) || 'read-only';
 const cwd = opt('-C') || process.cwd();
 
 let prompt = '';
@@ -66,7 +67,7 @@ async function run() {
 
   if (prompt.includes('설정 보기')) {
     const images = args.filter(a => a.startsWith('--image=')).map(a => path.basename(a.slice(8)));   // 같이 넘겨받은 사진
-    say(`sandbox=${sandbox} win=${conf('windows.sandbox') || '-'} type=${/cmd \/c type/.test(prompt)} model=${opt('-m') || '-'} effort=${conf('model_reasoning_effort') || '-'} resume=${resume} ignoreUserConfig=${args.includes('--ignore-user-config')} 안내=${/\[(관제실 안내|Control room notice)\]/.test(prompt)} 쪽지=${!!note} images=${images.join(',') || '-'}`);
+    say(`sandbox=${sandbox} win=${conf('windows.sandbox') || '-'} type=${/cmd \/c type/.test(prompt)} model=${opt('-m') || '-'} effort=${conf('model_reasoning_effort') || '-'} resume=${resume} ignoreUserConfig=${args.includes('--ignore-user-config')} 안내=${/\[(관제실 안내|Control room notice)\]/.test(prompt)} 쪽지=${!!note} images=${images.join(',') || '-'} perm=${conf('default_permissions') || '-'} deny=${conf('permissions.cr.filesystem') || '-'}`);
     return done();
   }
   if (note && prompt.includes('쪽지 보기')) {
