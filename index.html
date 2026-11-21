@@ -934,6 +934,13 @@
   .state.ok { color: var(--ok); }
   .state.bad { color: #ff9b9b; }
   .note { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.6; }
+  /* 설정 → 앱의 보안 기록 */
+  .sec-log { margin-top: 12px; }
+  .sec-log summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
+  .sec-log ul { list-style: none; margin: 8px 0; padding: 0; max-height: 260px; overflow: auto; font-size: 12px; }
+  .sec-log li { padding: 4px 0; border-bottom: 1px solid var(--line); color: var(--text-2); overflow-wrap: anywhere; }
+  .sec-log li.warn { color: var(--warn); }
+  .sec-log li .mono { margin-right: 6px; }
   .gap { display: flex; gap: 8px; flex-wrap: wrap; }
   .toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; cursor: pointer; }
   .toggle input { position: absolute; opacity: 0; pointer-events: none; }
@@ -1276,8 +1283,11 @@
             <div class="kv"><span class="k">로그인</span><span class="v" id="codexAuth"></span></div>
             <div class="kv"><span class="k">찾은 위치</span><span class="v mono" id="codexFound"></span></div>
             <div class="kv"><span class="k">버전</span><span class="v mono" id="codexVer"></span></div>
-            <div class="gap"><button class="btn" data-act="codex-detect">다시 확인</button></div>
-            <p class="note" data-i18n="note-codex">모델 칸에서 GPT 모델을 고르면 그 에이전트는 Codex로 일해요. 내 ChatGPT 계정(무료 요금제 포함)의 Codex 사용량을 쓰고 따로 돈은 나가지 않아요. 허락을 물을 수 없어서 작업 폴더 안에서만 파일을 고쳐요. 로그인은 Codex 앱이나 명령창의 <code>codex login</code>으로 해요.</p>
+            <div class="gap">
+              <button class="btn primary" data-act="codex-login">GPT 로그인 창 열기</button>
+              <button class="btn" data-act="codex-detect">다시 확인</button>
+            </div>
+            <p class="note" data-i18n="note-codex">모델 칸에서 GPT 모델을 고르면 그 에이전트는 Codex로 일해요. 내 ChatGPT 계정(무료 요금제 포함)의 Codex 사용량을 쓰고 따로 돈은 나가지 않아요. 허락을 물을 수 없어서 작업 폴더 안에서만 파일을 고쳐요. <b>GPT 로그인 창 열기</b>를 누르면 검은 창과 브라우저가 뜨는데, 거기서 내 ChatGPT 계정으로 직접 로그인하면 돼요.</p>
           </section>
           <section class="group">
             <h2 translate="no">언어 · Language</h2>
@@ -1334,6 +1344,11 @@
               <button class="btn danger" data-act="shutdown">앱 끄기 (모든 에이전트 멈춤)</button>
             </div>
             <p class="note">진단 정보는 문제가 생겨 도움을 구할 때 붙여 넣는 글이에요. 버전·설정·최근 오류만 담고, 시킨 일의 내용과 열쇠는 넣지 않아요.</p>
+            <details class="sec-log">
+              <summary>보안 기록 <span class="vsub" id="secCount"></span></summary>
+              <ul id="secList"></ul>
+              <p class="note">허락·거절, 위험한 설정 바꾸기, 막은 일, 열쇠 없이 들어오려던 접근을 기록 폴더의 security.jsonl 에 남겨요. 시킨 일의 내용과 열쇠 값은 넣지 않아요.</p>
+            </details>
           </section>
         </div>
       </div>
@@ -1845,13 +1860,17 @@ function onMessage(m) {
         agents: m.agents, logs: m.logs, history: m.history, settings: m.settings, auth: m.auth,
         claude: m.claude, codex: m.codex || {}, limits: m.limits, colors: m.colors, app: m.app, limit: m.limit || {}, ccr: m.ccr || {},
         supervisor: m.supervisor || null, reports: m.reports || [], plans: m.plans || [],
-        staff: m.staff || (m.supervisor ? { supervisor: m.supervisor } : {}),
+        staff: m.staff || (m.supervisor ? { supervisor: m.supervisor } : {}), security: m.security || [],
       });
       if (S.settings.lang && S.settings.lang !== LANG) { location.reload(); return; }   // 꺼진 사이에 언어를 바꿨으면 그 언어로 다시 불러온다
       for (const k of Object.keys(live)) delete live[k];
       fixSelections();
       renderAll();
       renderSetup();
+      break;
+    case 'security':
+      S.security = [...(S.security || []), m.event].slice(-50);
+      renderSecurity();
       break;
     case 'agents':
       S.agents = m.agents;
@@ -2081,6 +2100,7 @@ function renderAll() {
   renderReports();
   renderPlans();
   renderCodex();
+  renderSecurity();
 }
 
 function renderTop() {
@@ -3204,9 +3224,38 @@ function renderCodex() {
   const c = S.codex || {};
   $('#codexAuth').innerHTML = !c.path ? `<span class="state bad">${t('Codex를 찾지 못했어요 — Codex 앱을 깔거나 npm install -g @openai/codex')}</span>`
     : c.loggedIn ? `<span class="state ok">${esc(c.method || '')} ${t('로그인됨')}${c.models?.length ? ` · ${t('GPT 모델 {n}개', { n: c.models.length })}` : ''}</span>`
-      : c.loggedIn === false ? `<span class="state bad">${t('로그인 필요 — Codex 앱이나 명령창에서 codex login')}</span>` : t('확인하는 중…');
+      : c.loggedIn === false ? `<span class="state bad">${t('로그인 필요 — 아래 GPT 로그인 창 열기를 눌러 주세요')}</span>` : t('확인하는 중…');
   $('#codexFound').textContent = c.path || '-';
   $('#codexVer').textContent = c.version || '-';
+}
+
+// ── 보안 기록 (설정 → 앱): 서버가 남긴 일을 한 줄씩 사람 말로 보여 준다. 새것이 위
+const secKey = k => ({
+  claudePath: t('claude 위치'), fallbackUrl: t('대체 AI 주소'), fallbackEnabled: t('대체 AI 켜기'), fallbackKey: t('CCR 열쇠'),
+  defaultCwd: t('기본 작업 폴더'), dataDir: t('기록 폴더'), cwd: t('작업 폴더'), permissionMode: t('허락 방식'), engine: 'AI',
+})[k] || k;
+const secWhat = w => ({
+  cwd: t('위험한 작업 폴더'), start: t('위험한 폴더에서 일 시작'), claudePath: t('claude 위치'), fallbackUrl: t('바깥 게이트웨이 주소'),
+  preview: t('미리 보기의 폴더 밖 접근'), token: 'API', page: t('화면'), boot: t('창 열기 번호'), claude: 'Claude', codex: 'GPT',
+})[w] || w;
+function secText(e) {
+  switch (e.kind) {
+    case 'perm': return `${e.agent}: ${toolKo(e.tool)} ${e.decision === 'deny' ? t('거절') : e.decision === 'always' ? t('계속 허락') : t('허락')}${e.summary ? ` — ${e.summary}` : ''}`;
+    case 'setting': return t('{key} 바꿈 → {to}', { key: secKey(e.key), to: e.to === undefined ? t('(숨김)') : String(e.to) });
+    case 'agent': return t('{agent} · {key} 바꿈 → {to}', { agent: e.agent, key: secKey(e.key), to: String(e.to) });
+    case 'blocked': return t('막았어요: {what} — {value}', { what: secWhat(e.what), value: e.value || '' }) + (e.why ? ` (${e.why})` : '');
+    case 'auth': return t('열쇠 없이 들어오려던 접근을 막았어요 ({what})', { what: secWhat(e.what) });
+    case 'window': return t('관제실 창이 열쇠를 받았어요');
+    case 'login': return t('{what} 로그인 창을 열었어요', { what: secWhat(e.what) });
+    default: return e.kind;
+  }
+}
+function renderSecurity() {
+  const list = (S.security || []).slice().reverse();
+  $('#secCount').textContent = list.length ? t('최근 {n}개', { n: list.length }) : '';
+  $('#secList').innerHTML = list.length
+    ? list.map(e => `<li${e.kind === 'blocked' || e.kind === 'auth' ? ' class="warn"' : ''}><span class="mono muted">${esc(timeText(e.t))}</span> ${esc(secText(e))}</li>`).join('')
+    : `<li class="muted">${t('아직 기록이 없어요')}</li>`;
 }
 
 function renderCcr() {
@@ -3492,6 +3541,9 @@ function wire() {
       case 'auth-check': api('POST', '/api/auth/check'); break;
       case 'detect': api('POST', '/api/claude/detect'); break;
       case 'codex-detect': api('POST', '/api/codex/detect'); break;
+      case 'codex-login':
+        if (await api('POST', '/api/codex/login')) toast(t('GPT 로그인 창을 열었어요. 브라우저에서 ChatGPT 계정으로 로그인을 마치면 저절로 확인돼요.'), 'ok');
+        break;
       case 'stop-all': api('POST', '/api/stop-all'); break;
       case 'preview': { const h = S.history.find(x => x.id === el.dataset.h); if (h) openPreview(h); break; }
       case 'pv-reload': if (previewing) $('#previewFrame').src = previewUrl(previewing.agentId, previewing.preview); break;

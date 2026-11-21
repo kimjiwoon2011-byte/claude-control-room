@@ -30,7 +30,7 @@ test('영어 사전에는 쓰지 않는 글이 남아 있지 않다', () => {
 
 test('한국어 글은 모두 t() 를 거친다', () => {
   // 번역하지 않는 것: 한국어 조사(값으로 넘긴다), 파일 이름, 윈도 창 제목
-  const ALLOWED = new Set(['이', '가', '을', '를', '과', '와', '로그인.bat', 'start "Claude 로그인" "']);
+  const ALLOWED = new Set(['이', '가', '을', '를', '과', '와', '로그인.bat', 'start "Claude 로그인" "', 'start "GPT 로그인" "']);
   const raw = found.raw.filter(r => !ALLOWED.has(r.text)).map(r => `${r.where}  ${JSON.stringify(r.text)}`);
   assert.deepEqual([...raw, ...found.errors], [], `t() 로 감싸지 않은 글:${list([...raw, ...found.errors])}`);
 });

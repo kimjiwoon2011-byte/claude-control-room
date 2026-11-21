@@ -322,6 +322,61 @@ test('claude 위치는 claude 실행 파일만, 작업 폴더 밖에서만 / 대
   });
 });
 
+test('CCR 열쇠는 윈도 암호화(DPAPI)로 저장하고 다시 켜면 풀어 쓴다 — 예전 평문 기록도 다음 저장 때 바꿔 둔다', { skip: !onWindows }, async () => {
+  const home = tempDir();
+  seed(home, { settings: { fallbackKey: 'sk-old-plain-123' } });   // 예전처럼 평문으로 저장돼 있던 기록
+  const file = path.join(home, 'data', 'state.json');
+  let srv = await startServer({ home });
+  try {
+    assert.equal((await srv.state()).settings.fallbackKey, 'sk-old-plain-123');
+    await srv.api('POST', '/api/settings', { sound: false });   // 아무거나 바꿔서 저장시킨다
+    await srv.stop();
+    let raw = fs.readFileSync(file, 'utf8');
+    assert.ok(!raw.includes('sk-old-plain-123'), '평문 열쇠가 남아 있다');
+    assert.match(raw, /"fallbackKeyEnc":"[A-Za-z0-9+/=]{40,}"/);
+    srv = await startServer({ home });
+    assert.equal((await srv.state()).settings.fallbackKey, 'sk-old-plain-123');
+    await srv.api('POST', '/api/settings', { fallbackKey: 'sk-new-secret-456' });
+    await srv.stop();
+    raw = fs.readFileSync(file, 'utf8');
+    assert.ok(!raw.includes('sk-new-secret-456'));
+    srv = await startServer({ home });
+    assert.equal((await srv.state()).settings.fallbackKey, 'sk-new-secret-456');
+  } finally {
+    await srv.stop();
+    removeDir(home);
+  }
+});
+
+test('보안 기록: 허락·막은 일·위험한 설정 바꾸기·열쇠 없는 접근을 남기고(열쇠 값은 빼고), 다시 켜도 남아 있다', async () => {
+  const home = tempDir();
+  seed(home);
+  let srv = await startServer({ home });
+  try {
+    await send(srv, '파일 살펴봐 줘');   // 가짜 claude 는 npm test 를 돌려도 되는지 허락을 구한다
+    const asked = await srv.until(st => agentOf(st, 'a1').pending.length, '허락 요청');
+    await srv.api('POST', '/api/agents/a1/permission', { requestId: agentOf(asked, 'a1').pending[0].requestId, decision: 'deny' });
+    await srv.raw('PATCH', '/api/agents/a1', { cwd: home });   // 기록 폴더를 품은 곳이라 막힌다
+    await srv.api('POST', '/api/settings', { fallbackUrl: 'http://localhost:3999', fallbackKey: 'sk-sec-test-789' });
+    await fetch(`${srv.base}/api/state`);   // 열쇠 없이
+    const s = await srv.until(st => st.security?.some(e => e.kind === 'auth'), '보안 기록이 쌓임');
+    const has = (kind, check) => s.security.some(e => e.kind === kind && check(e));
+    assert.ok(has('perm', e => e.decision === 'deny' && e.agent === '일꾼 1'), '허락 거절');
+    assert.ok(has('blocked', e => e.what === 'cwd'), '위험한 폴더 막음');
+    assert.ok(has('setting', e => e.key === 'fallbackUrl' && e.to === 'http://localhost:3999'), '게이트웨이 주소 바꿈');
+    assert.ok(has('setting', e => e.key === 'fallbackKey' && e.to === undefined), '열쇠 바꿈 (값 없이)');
+    assert.ok(has('auth', e => e.what === 'token'), '열쇠 없는 API 접근');
+    await srv.stop();
+    const raw = fs.readFileSync(path.join(home, 'data', 'security.jsonl'), 'utf8');
+    assert.ok(!raw.includes('sk-sec-test-789'), '보안 기록에 열쇠 값이 들어갔다');
+    srv = await startServer({ home });
+    assert.ok((await srv.state()).security.some(e => e.kind === 'perm'), '다시 켜도 남아 있다');
+  } finally {
+    await srv.stop();
+    removeDir(home);
+  }
+});
+
 test('검사 자리 설정은 다시 켜도 그대로 남는다', async () => {
   const home = tempDir();
   seed(home);

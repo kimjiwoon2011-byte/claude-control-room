@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawn, execFile, execFileSync } = require('node:child_process');
+const { spawn, spawnSync, execFile, execFileSync } = require('node:child_process');
 
 // ── 실행 옵션: node server.js [--port 7707] [--no-open] [--no-ccr] [--home 폴더] [--data 폴더] [--claude 경로] [--codex 경로] ──
 const argv = process.argv.slice(2);
@@ -225,6 +225,16 @@ function loadState() {
   const saved = readJson(path.join(DATA_DIR, 'state.json')) || {};
   const logs = readJson(path.join(DATA_DIR, 'logs.json')) || {};
   settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
+  if (settings.fallbackKeyEnc) {   // 윈도 암호화로 저장된 CCR 열쇠를 푼다 (다른 PC·다른 사용자에서 옮겨 온 기록이면 못 푼다)
+    try {
+      settings.fallbackKey = unprotectKey(settings.fallbackKeyEnc);
+      keyCache = { plain: settings.fallbackKey, enc: settings.fallbackKeyEnc };   // 바뀌기 전에는 다시 암호화하지 않는다
+    } catch {
+      settings.fallbackKey = '';
+      console.log(t('저장된 CCR 열쇠를 풀지 못했어요. 설정 창에서 다시 넣어 주세요.'));
+    }
+    delete settings.fallbackKeyEnc;
+  }
   // 전부터 쓰던 기록이면 한국어로 설정을 마친 것으로 본다. 처음 켜면 PC 언어로 시작하고, 첫 화면에서 언어·저장 위치를 고른다
   if (saved.settings && saved.settings.setupDone === undefined) Object.assign(settings, { setupDone: true, lang: saved.settings.lang || 'ko' });
   if (!LANGS.includes(settings.lang)) settings.lang = osLang();
@@ -269,6 +279,62 @@ function loadState() {
 const staffList = () => STAFF_KEYS.map(k => staff[k]).filter(Boolean);
 const allAgents = () => [...agents, ...staffList()];
 
+// CCR 열쇠는 윈도 암호화(DPAPI: 이 PC 의 이 사용자만 풀 수 있다)로 저장한다. 기록 파일이 밖으로 나가도(백업·공유·실수로 올리기) 열쇠는 쓸 수 없다.
+// Node 에는 DPAPI 가 없어서 PowerShell 에 맡긴다. 열쇠는 명령줄이 아니라 표준 입력으로, 글자 깨짐이 없게 base64 로 주고받는다.
+// 느려서(0.5초쯤) 열쇠가 바뀔 때만 다시 암호화하고(keyCache), 푸는 건 켤 때 한 번뿐이다. 윈도가 아니면 예전처럼 평문으로 둔다
+function dpapi(op, b64) {
+  const call = op === 'protect' ? 'Protect' : 'Unprotect';
+  const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $in=[Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()); [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::${call}($in, $null, 'CurrentUser'))`;
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { input: b64, encoding: 'utf8', windowsHide: true, timeout: 20000 });
+  const out = String(r.stdout || '').trim();
+  if (r.status !== 0 || !/^[A-Za-z0-9+/=]+$/.test(out)) throw new Error(String(r.stderr || r.error?.message || 'dpapi').trim().slice(0, 200));
+  return out;
+}
+const protectKey = plain => dpapi('protect', Buffer.from(plain, 'utf8').toString('base64'));
+const unprotectKey = enc => Buffer.from(dpapi('unprotect', enc), 'base64').toString('utf8');
+let keyCache = { plain: null, enc: null };
+function settingsToSave() {
+  const key = settings.fallbackKey;
+  if (process.platform !== 'win32' || !key) return settings;
+  if (keyCache.plain !== key) {
+    try { keyCache = { plain: key, enc: protectKey(key) }; } catch (e) {
+      console.error(t('CCR 열쇠를 암호화하지 못해서 그대로 저장했어요: {why}', { why: e.message }));
+      return settings;
+    }
+  }
+  const { fallbackKey, ...rest } = settings;
+  return { ...rest, fallbackKeyEnc: keyCache.enc };
+}
+
+// ── 보안 기록 ──
+// 허락·막은 일·위험한 설정 바꾸기·열쇠 없는 접근을 기록 폴더의 security.jsonl 에 한 줄씩 남긴다. 시킨 일의 내용과 열쇠 값은 넣지 않는다.
+// 같은 종류의 '열쇠 없는 접근'은 1분에 한 번만 남긴다 (서버를 다시 켠 뒤 옛 창이 계속 다시 붙어도 기록이 넘치지 않게)
+const SEC_KEEP = 200;
+const secFile = () => path.join(DATA_DIR, 'security.jsonl');
+let secEvents = [];
+const secQuiet = new Map();
+function secLog(kind, detail = {}, quiet) {
+  if (quiet) {
+    if (Date.now() - (secQuiet.get(quiet) || 0) < 60_000) return;
+    secQuiet.set(quiet, Date.now());
+  }
+  const e = { t: Date.now(), kind, ...detail };
+  secEvents.push(e);
+  if (secEvents.length > SEC_KEEP) secEvents.shift();
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFileSync(secFile(), JSON.stringify(e) + '\n');
+  } catch { /* 못 써도 앱은 계속 돈다 */ }
+  broadcast({ type: 'security', event: e });
+}
+function loadSecurity() {
+  try {
+    const lines = fs.readFileSync(secFile(), 'utf8').split('\n').filter(Boolean);
+    secEvents = lines.slice(-SEC_KEEP).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    if (lines.length > 2000) fs.writeFileSync(secFile(), lines.slice(-1000).join('\n') + '\n');   // 너무 길어지면 오래된 것부터 버린다
+  } catch { secEvents = []; }
+}
+
 let saveTimer = null;
 function save() {
   if (!saveTimer) saveTimer = setTimeout(saveNow, 500);
@@ -280,7 +346,7 @@ function saveNow(dir = DATA_DIR) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     writeJson(path.join(dir, 'state.json'), {
-      settings,
+      settings: settingsToSave(),
       agents: agents.map(a => ({
         id: a.id, name: a.name, color: a.color, role: a.role, cwd: a.cwd, model: a.model, effort: a.effort, fast: a.fast,
         engine: a.engine, gptModel: a.gptModel, codexThread: a.codexThread, lastAi: a.lastAi, failedCarry: a.failedCarry || undefined,
@@ -389,6 +455,7 @@ function snapshot() {
     limits: { min: MIN_AGENTS, max: MAX_AGENTS },
     colors: COLORS,
     app: appInfo(),
+    security: secEvents.slice(-50),
   };
 }
 
@@ -563,6 +630,42 @@ function codexModels() {
   } catch { return []; }
 }
 
+// 로그인 상태는 stderr 로 나온다 ("Logged in using ChatGPT" / "Not logged in")
+function checkCodexLogin() {
+  const found = codex.path;
+  if (!found) return;
+  const [cmd, args] = command(found, ['login', 'status']);
+  execFile(cmd, args, { env: childEnv(), windowsHide: true, timeout: 30000 }, (err, out, errOut) => {
+    if (codex.path !== found) return;
+    const text = `${out}\n${errOut}`;
+    codex.loggedIn = /logged in/i.test(text) && !/not logged in/i.test(text);
+    codex.method = !codex.loggedIn ? null : /chatgpt/i.test(text) ? 'ChatGPT' : /api key/i.test(text) ? t('API 키') : null;
+    broadcast({ type: 'codex', codex });
+  });
+}
+
+// GPT 로그인 창: Claude 로그인처럼 새 검은 창에서 `codex login` 을 띄운다. 브라우저에서 내 ChatGPT 계정으로 로그인하면
+// 그 로그인(~/.codex/auth.json)으로 GPT 에이전트가 일한다. 3분 동안 4초마다 로그인됐는지 다시 본다
+let codexLoginWatch = null;
+function openCodexLogin() {
+  if (!codex.path) return t('먼저 Codex 를 찾아야 해요. Codex 앱을 깔고 설정 창에서 다시 확인을 눌러 주세요.');
+  if (process.platform !== 'win32') return t('터미널에서 codex login 을 실행해 주세요.');
+  const [cmd, args] = command(codex.path, []);
+  // 경로는 환경 변수로 넘긴다 (start 줄에 따옴표 친 인자가 더 붙으면 cmd 가 따옴표를 엉뚱하게 벗겨 낸다)
+  const env = { ...childEnv(), LOGIN_KIND: 'codex', LOGIN_CODEX: cmd, LOGIN_CODEX_ARG: args.map(a => `"${a}"`).join(' ') };
+  spawn('cmd.exe', ['/d', '/c', `start "GPT 로그인" "${path.join(ROOT, '로그인.bat')}"`], {
+    env, windowsVerbatimArguments: true, detached: true, stdio: 'ignore', windowsHide: true,
+  }).unref();
+  secLog('login', { what: 'codex' });
+  clearInterval(codexLoginWatch);
+  const until = Date.now() + 3 * 60 * 1000;
+  codexLoginWatch = setInterval(() => {
+    if (Date.now() > until || codex.loggedIn) { clearInterval(codexLoginWatch); return; }
+    checkCodexLogin();
+  }, 4000);
+  return null;
+}
+
 function detectCodex() {
   codex = { path: findCodex(), version: null, loggedIn: null, method: null, models: codexModels(), sandbox: null };
   broadcast({ type: 'codex', codex });
@@ -587,15 +690,7 @@ function detectCodex() {
     codex.version = String(out || '').trim().split(/\r?\n/)[0] || null;
     broadcast({ type: 'codex', codex });
   });
-  // 로그인 상태는 stderr 로 나온다 ("Logged in using ChatGPT" / "Not logged in")
-  const [cmd2, args2] = command(found, ['login', 'status']);
-  execFile(cmd2, args2, { env: childEnv(), windowsHide: true, timeout: 30000 }, (err, out, errOut) => {
-    if (codex.path !== found) return;
-    const text = `${out}\n${errOut}`;
-    codex.loggedIn = /logged in/i.test(text) && !/not logged in/i.test(text);
-    codex.method = !codex.loggedIn ? null : /chatgpt/i.test(text) ? 'ChatGPT' : /api key/i.test(text) ? t('API 키') : null;
-    broadcast({ type: 'codex', codex });
-  });
+  checkCodexLogin();
 }
 
 const AI_KO = { claude: 'Claude', fallback: '대체 AI', gpt: 'GPT(Codex)' };
@@ -691,7 +786,7 @@ function codexError(msg) {
   const text = stripAnsi(String(msg || '')).trim();
   const kind = codexErrorKind(text);
   if (kind === 'limit') return `${t('GPT(Codex) 사용량 한도에 걸렸어요. 한도가 풀리면 다시 시켜 주세요.')}\n${text}`;
-  if (kind === 'login') return `${t('Codex 로그인이 필요해요. Codex 앱이나 명령창(codex login)에서 ChatGPT 로 로그인해 주세요.')}\n${text}`;
+  if (kind === 'login') return `${t('Codex 로그인이 필요해요. 설정 창의 GPT 로그인 창 열기(또는 Codex 앱)로 ChatGPT 계정에 로그인해 주세요.')}\n${text}`;
   return text || t('GPT(Codex)가 알 수 없는 오류로 멈췄어요');
 }
 
@@ -1287,11 +1382,12 @@ function pump(a) {
   const useCodex = a.engine === 'codex';
   const problem = (useCodex
     ? (!codex.path ? t('GPT(Codex) 프로그램을 찾지 못했어요. Codex 앱을 깔거나 설정 창에서 다시 찾아 주세요.')
-      : codex.loggedIn === false ? t('Codex 로그인이 필요해요. Codex 앱이나 명령창(codex login)에서 ChatGPT 로 로그인해 주세요.') : null)
+      : codex.loggedIn === false ? t('Codex 로그인이 필요해요. 설정 창의 GPT 로그인 창 열기(또는 Codex 앱)로 ChatGPT 계정에 로그인해 주세요.') : null)
     : (!claude.path ? t('claude 를 찾지 못했어요. 설정 창에서 claude 위치를 확인해 주세요.') : null))
     || (!isDir(a.cwd) ? t('작업 폴더가 없어요: {dir}\n에이전트 관리 창에서 폴더를 다시 골라 주세요.', { dir: a.cwd }) : null)
     // 예전에 저장해 둔 위험한 폴더면 시작하지 않는다 (지금은 고를 때 막는다)
     || (riskyCwd(a.cwd) ? `${riskyText(a.cwd, riskyCwd(a.cwd))}\n${t('에이전트 관리 창에서 다른 폴더를 골라 주세요.')}` : null);
+  if (problem && riskyCwd(a.cwd)) secLog('blocked', { what: 'start', agent: a.name, value: a.cwd, why: riskyCwd(a.cwd) });
   if (problem) {
     a.queue = [];
     addLog(a, { k: 'err', text: problem });
@@ -2201,6 +2297,7 @@ function answerPermission(a, requestId, decision) {
     if (decision === 'always' && p.suggestions.length) response.updatedPermissions = p.suggestions.map(s => ({ ...s, destination: 'session' }));
   }
   write(p.proc, { type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
+  secLog('perm', { agent: a.name, tool: p.tool, summary: firstLine(p.summary).slice(0, 120), decision });
   const verb = decision === 'deny' ? t('거절') : decision === 'always' ? t('계속 허락') : t('허락');
   addLog(a, { k: 'sys', text: `${verb} · ${toolKo(p.tool)} ${firstLine(p.summary).slice(0, 80)}` });
   setStatus(a, a.pending.size ? 'waiting' : a.current ? 'working' : 'idle');
@@ -2318,6 +2415,7 @@ const hasSession = req => (req.headers.cookie || '').split(';').some(c => c.trim
 function enterWithCode(res, k) {
   const ok = BOOT.get(k) > Date.now();
   BOOT.delete(k);
+  if (ok) secLog('window'); else secLog('auth', { what: 'boot' }, 'auth-boot');
   res.writeHead(302, {
     Location: '/',
     'Cache-Control': 'no-store',
@@ -2329,6 +2427,7 @@ function enterWithCode(res, k) {
 
 // 쿠키 없이 화면을 달라는 요청: 열쇠 없이 다시 여는 법만 알려 준다
 function serveLocked(res) {
+  secLog('auth', { what: 'page' }, 'auth-page');
   res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' });
   res.end(`<!doctype html><html lang="${settings.lang === 'en' ? 'en' : 'ko'}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${t('클로드 관제실')}</title>
 <body style="margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;background:#141413;color:#ece9e2;font:15px/1.6 system-ui,sans-serif;text-align:center">
@@ -2532,13 +2631,14 @@ function apiUpdate(a, b) {
     const dir = path.resolve(b.cwd.trim());
     if (!isDir(dir)) return fail(400, t('그 폴더가 없어요: {dir}', { dir }));
     const why = riskyCwd(dir);
-    if (why) return fail(400, riskyText(dir, why));
+    if (why) { secLog('blocked', { what: 'cwd', agent: a.name, value: dir, why }); return fail(400, riskyText(dir, why)); }
     a.cwd = dir;
   }
   if (typeof b.name === 'string' && b.name.trim()) a.name = b.name.trim().slice(0, 20);
   if (typeof b.color === 'string' && /^#[0-9a-f]{6}$/i.test(b.color)) a.color = b.color;
   if (typeof b.role === 'string') a.role = b.role.slice(0, 2000);
   applyRunOptions(a, b);
+  for (const key of ['cwd', 'permissionMode', 'engine']) if (a[key] !== before[key]) secLog('agent', { agent: a.name, key, to: a[key] });
   if (a.cwd !== before.cwd) {
     // 대화 기록은 폴더별로 저장돼서 다른 폴더에서는 이어 할 수 없다
     a.sessionId = null;
@@ -2584,8 +2684,10 @@ function apiDataDir(b) {
     return fail(400, t('config.json 을 쓰지 못했어요: {why}', { why: e.message }));
   }
   const old = DATA_DIR;
+  try { fs.copyFileSync(path.join(old, 'security.jsonl'), path.join(dir, 'security.jsonl')); } catch { /* 보안 기록이 아직 없음 */ }
   DATA_DIR = dir;
-  for (const f of ['state.json', 'logs.json']) { try { fs.unlinkSync(path.join(old, f)); } catch { /* 없으면 그만 */ } }
+  for (const f of ['state.json', 'logs.json', 'security.jsonl']) { try { fs.unlinkSync(path.join(old, f)); } catch { /* 없으면 그만 */ } }
+  secLog('setting', { key: 'dataDir', to: dir });
   console.log(`[${clock()}] ${t('저장 폴더를 옮겼어요 → {dir}', { dir })}`);
   broadcast({ type: 'app', app: appInfo() });
   return OK;
@@ -2600,7 +2702,7 @@ function apiSetup(b) {
   if (typeof b.defaultCwd === 'string' && b.defaultCwd.trim()) {
     const dir = path.resolve(b.defaultCwd.trim());
     const why = riskyCwd(dir);
-    if (why) return fail(400, riskyText(dir, why));
+    if (why) { secLog('blocked', { what: 'cwd', value: dir, why }); return fail(400, riskyText(dir, why)); }
     try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 아래에서 알려 준다 */ }
     if (!isDir(dir)) return fail(400, t('그 폴더를 만들 수 없어요: {dir}', { dir }));
     const before = settings.defaultCwd;
@@ -2615,12 +2717,15 @@ function apiSetup(b) {
   return OK;
 }
 
+const SEC_SETTINGS = ['defaultCwd', 'fallbackUrl', 'fallbackEnabled', 'fallbackKey', 'claudePath'];   // 바뀌면 보안 기록에 남기는 설정 (열쇠는 값 없이)
+
 function apiSettings(b) {
+  const secBefore = Object.fromEntries(SEC_SETTINGS.map(k => [k, settings[k]]));
   if (typeof b.defaultCwd === 'string' && b.defaultCwd.trim()) {
     const dir = path.resolve(b.defaultCwd.trim());
     if (!isDir(dir)) return fail(400, t('그 폴더가 없어요: {dir}', { dir }));
     const why = riskyCwd(dir);
-    if (why) return fail(400, riskyText(dir, why));
+    if (why) { secLog('blocked', { what: 'cwd', value: dir, why }); return fail(400, riskyText(dir, why)); }
     settings.defaultCwd = dir;
   }
   applyDefaults({
@@ -2649,7 +2754,10 @@ function apiSettings(b) {
   if (typeof b.fallbackUrl === 'string') {
     const url = b.fallbackUrl.trim() || DEFAULT_SETTINGS.fallbackUrl;
     // 대체 AI 게이트웨이(CCR)는 이 PC 에서 돈다. 바깥 주소면 시킨 일과 CCR 열쇠가 그 서버로 간다
-    if (!LOCAL_URL.test(url)) return fail(400, t('게이트웨이 주소는 이 PC의 http:// 주소(127.0.0.1 또는 localhost)여야 해요'));
+    if (!LOCAL_URL.test(url)) {
+      secLog('blocked', { what: 'fallbackUrl', value: url.slice(0, 200) });
+      return fail(400, t('게이트웨이 주소는 이 PC의 http:// 주소(127.0.0.1 또는 localhost)여야 해요'));
+    }
     settings.fallbackUrl = url.replace(/\/+$/, '');
   }
   if (typeof b.fallbackKey === 'string') settings.fallbackKey = b.fallbackKey.trim();
@@ -2667,13 +2775,16 @@ function apiSettings(b) {
     // 관제실이 샌드박스 없이 돌리는 프로그램이다: claude 실행 파일만, 그리고 에이전트(특히 GPT)가 쓸 수 있는 작업 폴더 밖의 것만 받는다
     const file = real(b.claudePath.trim());
     if (!/^claude(\.exe)?$/i.test(path.basename(file)) && !/[\\/]@anthropic-ai[\\/]claude-code[\\/]cli\.m?js$/i.test(file)) {
+      secLog('blocked', { what: 'claudePath', value: file });
       return fail(400, t('claude 위치에는 claude 실행 파일(claude.exe 나 @anthropic-ai/claude-code 의 cli.js)만 고를 수 있어요'));
     }
     if ([settings.defaultCwd, ...allAgents().map(a => a.cwd)].some(d => d && inside(real(d), file))) {
+      secLog('blocked', { what: 'claudePath', value: file });
       return fail(400, t('에이전트 작업 폴더 안의 프로그램은 claude 위치로 고를 수 없어요'));
     }
   }
   if (pathChanged) settings.claudePath = b.claudePath.trim();
+  for (const key of SEC_SETTINGS) if (settings[key] !== secBefore[key]) secLog('setting', { key, to: key === 'fallbackKey' ? undefined : settings[key] });
   broadcast({ type: 'settings', settings });
   if (pathChanged) detectClaude();
   save();
@@ -2694,6 +2805,7 @@ async function route(method, p, b) {
   if (method === 'GET' && p === '/api/diagnostics') return [200, diagnostics()];
   if (method === 'POST' && p === '/api/auth/check') { checkAuth(); return OK; }
   if (method === 'POST' && p === '/api/auth/login') { const why = openLogin(); return why ? fail(400, why) : OK; }
+  if (method === 'POST' && p === '/api/codex/login') { const why = openCodexLogin(); return why ? fail(400, why) : OK; }
   if (method === 'POST' && p === '/api/claude/detect') { detectClaude(); return OK; }
   if (method === 'POST' && p === '/api/codex/detect') { detectCodex(); return OK; }
   if (method === 'POST' && p === '/api/ccr/check') { await ensureCcr(); if (!settings.fallbackEnabled) await checkCcr(); return [200, { ccr }]; }
@@ -2786,6 +2898,7 @@ async function handle(req, res) {
   // 화면 연결(EventSource)은 머리글을 못 붙여 쿠키로 연다. 다른 출처의 페이지는 이 연결을 읽을 수 없다
   const events = req.method === 'GET' && url.pathname === '/api/events';
   if (req.headers['x-token'] !== TOKEN && !(events && hasSession(req))) {
+    secLog('auth', { what: 'token', path: url.pathname.slice(0, 80) }, 'auth-token');
     return sendJson(res, 401, { error: t('화면을 새로 고침해 주세요 (열쇠가 맞지 않아요)') });
   }
   if (events) return openStream(req, res);
@@ -2861,7 +2974,10 @@ function servePreview(req, res) {
   if (!a || rel.includes('\0')) return no();
   // 파일 시스템에 묻기 전에 글자만으로 먼저 본다: \\서버\… (//서버/…) 경로는 realpath 만 불러도 윈도가 그 서버에 접속해
   // 로그인 정보가 새고, 이름에 실은 내용이 DNS 로 나가며, 기다리는 동안 서버 전체가 멈춘다
-  if (!inside(path.resolve(a.cwd), path.resolve(a.cwd, rel))) return no();
+  if (!inside(path.resolve(a.cwd), path.resolve(a.cwd, rel))) {
+    secLog('blocked', { what: 'preview', agent: a.name, value: rel.slice(0, 200) }, `pv-${rel.slice(0, 60)}`);   // 미리 보는 페이지가 폴더 밖을 노렸다
+    return no();
+  }
   try {
     const root = fs.realpathSync(path.resolve(a.cwd));
     let file = fs.realpathSync(path.resolve(root, rel));
@@ -2933,6 +3049,7 @@ server.listen(PORT, HOST, () => {
   // 여기부터는 이 서버가 포트를 잡은 뒤에만 한다 (또 켠 쪽이 켜져 있는 쪽의 첨부를 지우지 않게)
   try { fs.rmSync(uploadDir(), { recursive: true, force: true }); } catch { /* 보내지 않고 남은 첨부 (지난번에 켰을 때 것) */ }
   try { fs.rmSync(openRequest(), { force: true }); } catch { /* 지난번 쪽지 */ }
+  loadSecurity();
   previewServer.on('error', e => console.error(t('미리 보기 서버를 켜지 못했어요: {why}', { why: e.message })));
   previewServer.listen(0, HOST, () => {
     previewPort = previewServer.address().port;

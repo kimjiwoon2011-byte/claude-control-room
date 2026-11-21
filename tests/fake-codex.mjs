@@ -22,6 +22,7 @@ const hold = ms => new Promise(r => setTimeout(r, ms));   // FAKE_FAST 여도 �
 
 if (args[0] === '--version') { console.log('codex-cli 0.166.0 (fake)'); process.exit(0); }
 if (args[0] === 'login' && args[1] === 'status') { process.stderr.write('Logged in using ChatGPT\n'); process.exit(0); }
+if (args[0] === 'login') { console.log('fake codex: ChatGPT login (no browser)'); process.exit(0); }   // 로그인.bat 의 GPT 갈래를 볼 때
 // 'codex sandbox … -- 명령': 관제실이 켤 때 mxc 샌드박스를 쓸 수 있는지 본다. FAKE_MXC=1 이면 진짜 mxc 처럼 이 PC 연결이 막힌 척한다
 if (args[0] === 'sandbox') { console.log(process.env.FAKE_MXC === '1' ? 'CR_NET_EACCES' : 'CR_NET_ECONNREFUSED'); process.exit(0); }
 if (args[0] !== 'exec') { process.stderr.write(`fake codex: 모르는 명령 ${args.join(' ')}\n`); process.exit(2); }
