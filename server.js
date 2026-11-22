@@ -2576,8 +2576,11 @@ function pickUploads(ids) {
 // 첨부를 한 작업 폴더의 attachments/ 에 복사한다. 같은 이름이 있으면 '이름 (2).확장자' 처럼 피한다
 function copyAttachments(files, cwd) {
   if (!files.length) return [];
-  const dir = path.join(cwd, 'attachments');
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.join(cwd, 'attachments'), { recursive: true });
+  // 에이전트가 attachments 를 바깥을 가리키는 정션으로 바꿔 둘 수 있다 (예전 샌드박스의 GPT 도 만들 수 있다).
+  // 관제실은 샌드박스 밖에서 쓰므로 진짜 위치를 확인하고, 그 진짜 경로에 쓴다
+  const dir = real(path.join(cwd, 'attachments'));
+  if (!inside(real(cwd), dir)) throw new Error(t('작업 폴더의 attachments 가 폴더 밖을 가리키고 있어요'));
   return files.map(f => {
     const ext = path.extname(f.name);
     const base = f.name.slice(0, f.name.length - ext.length);

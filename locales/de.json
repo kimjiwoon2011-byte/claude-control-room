@@ -802,5 +802,6 @@
   "팀 게시판": "Team-Pinnwand",
   "(관제실이 쓰는 파일이에요. 읽기만 하고 고치지 마세요.)": "(Der Kontrollraum schreibt diese Datei. Lies sie, bearbeite sie nicht.)",
   "자동 요약": "Auto-Zusammenfassung",
-  "앱을 꺼서 멈췄어요": "Gestoppt, weil die App beendet wurde"
+  "앱을 꺼서 멈췄어요": "Gestoppt, weil die App beendet wurde",
+  "작업 폴더의 attachments 가 폴더 밖을 가리키고 있어요": "Der Ordner attachments im Arbeitsordner zeigt nach außerhalb des Arbeitsordners"
 }

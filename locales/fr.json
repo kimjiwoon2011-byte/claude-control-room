@@ -802,5 +802,6 @@
   "팀 게시판": "Tableau d'équipe",
   "(관제실이 쓰는 파일이에요. 읽기만 하고 고치지 마세요.)": "(La salle de contrôle écrit ce fichier. Lisez-le, ne le modifiez pas.)",
   "자동 요약": "résumé auto",
-  "앱을 꺼서 멈췄어요": "Arrêté parce que l'application a été fermée"
+  "앱을 꺼서 멈췄어요": "Arrêté parce que l'application a été fermée",
+  "작업 폴더의 attachments 가 폴더 밖을 가리키고 있어요": "Le dossier attachments du dossier de travail pointe en dehors de celui-ci"
 }

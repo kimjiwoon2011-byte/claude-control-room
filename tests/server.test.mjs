@@ -703,6 +703,23 @@ test('첨부: 파일 이름으로 작업 폴더 밖에 쓰거나 윈도 예약 �
   });
 });
 
+test('첨부: 에이전트가 attachments 를 작업 폴더 밖을 가리키는 정션으로 바꿔 두어도 밖에는 쓰지 않는다', async () => {
+  const outside = tempDir();
+  try {
+    await withServer(async srv => {
+      const work = path.join(srv.home, 'work');
+      fs.symlinkSync(outside, path.join(work, 'attachments'), 'junction');   // 예전 샌드박스(unelevated)의 GPT 도 만들 수 있다 (2026-11-22 확인)
+      const up = await upload(srv, 'note.txt', 'USER-FILE');
+      const r = await srv.raw('POST', '/api/send', { text: '빠르게 봐 줘', target: ['a1'], attachments: [up.body.id] });
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /attachments/);
+      assert.deepEqual(fs.readdirSync(outside), [], '작업 폴더 밖에 첨부가 쓰였다');
+    });
+  } finally {
+    removeDir(outside);
+  }
+});
+
 test('관제실을 또 켜면 이미 켜진 쪽이 한 번만 쓰는 새 주소로 창을 연다 (올려 둔 첨부도 지우지 않는다)', async () => {
   await withServer(async srv => {
     const up = await upload(srv, 'a.txt', 'hi');
