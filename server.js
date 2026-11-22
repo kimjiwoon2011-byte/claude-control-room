@@ -74,7 +74,7 @@ const PLAN_LIVE = ['planning', 'proposed', 'running', 'reporting'];   // 아직 
 const TASK_DONE = ['done', 'left', 'error', 'stopped'];               // 끝난 계획 조각
 
 const DEFAULT_SETTINGS = {
-  lang: '',            // 'ko' | 'en' — 비어 있으면 처음 켤 때 PC 언어로 정한다
+  lang: '',            // LANGS 중 하나 — 비어 있으면(처음 켤 때) 영어로 시작한다
   setupDone: false,    // 처음 켤 때 언어·저장 위치를 골랐는지
   claudePath: '',
   defaultCwd: WORKDIR,
@@ -150,11 +150,6 @@ const DICTS = Object.fromEntries(LANGS.filter(l => l !== 'ko').map(l => [l, read
 const fill = (s, vars) => (vars ? s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m)) : s);
 // {name} 자리에 값을 넣는다. 한국어 조사는 값으로 따로 넘긴다. 다른 언어 사전에 빠진 글은 영어로 보여 준다
 const t = (ko, vars) => fill(settings.lang === 'ko' ? ko : DICTS[settings.lang]?.[ko] ?? DICTS.en[ko] ?? ko, vars);
-// 처음 켤 때의 언어: PC 언어가 관제실에 있으면 그것, 없으면 영어
-const osLang = () => {
-  const p = String(Intl.DateTimeFormat().resolvedOptions().locale || '').slice(0, 2).toLowerCase();
-  return LANGS.includes(p) ? p : 'en';
-};
 // 기본 이름(클로드 N)을 어느 언어로 적었든 알아본다 — 언어를 바꿀 때 기본 이름만 새 언어로 바꾸려고
 const DEFAULT_NAME = new RegExp(`^(?:${[...new Set(['클로드 {n}', ...Object.values(DICTS).map(d => d['클로드 {n}']).filter(Boolean)])]
   .map(s => s.replace(/[.*+?^$()|[\]\\]/g, '\\$&').replace('{n}', '(\\d+)')).join('|')})$`);
@@ -243,9 +238,9 @@ function loadState() {
     }
     delete settings.fallbackKeyEnc;
   }
-  // 전부터 쓰던 기록이면 한국어로 설정을 마친 것으로 본다. 처음 켜면 PC 언어로 시작하고, 첫 화면에서 언어·저장 위치를 고른다
+  // 전부터 쓰던 기록이면 한국어로 설정을 마친 것으로 본다. 처음 켜면 영어로 시작하고, 첫 화면에서 언어·저장 위치를 고른다
   if (saved.settings && saved.settings.setupDone === undefined) Object.assign(settings, { setupDone: true, lang: saved.settings.lang || 'ko' });
-  if (!LANGS.includes(settings.lang)) settings.lang = osLang();
+  if (!LANGS.includes(settings.lang)) settings.lang = 'en';
   if (!Array.isArray(settings.fallbackModels)) settings.fallbackModels = [];
   if (settings.fallbackModel) {   // 예전 '모델 하나' 설정을 순서 목록으로 옮긴다
     if (!settings.fallbackModels.includes(settings.fallbackModel)) settings.fallbackModels.unshift(settings.fallbackModel);
@@ -576,14 +571,14 @@ function stopLoginWatch() {
   loginWatch = null;
 }
 
-// 새 콘솔 창에 로그인.bat 을 띄운다. 로그인은 사용자가 그 창과 브라우저에서 직접 한다.
+// 새 콘솔 창에 login.bat 을 띄운다. 로그인은 사용자가 그 창과 브라우저에서 직접 한다.
 function openLogin() {
   if (!claude.path) return t('먼저 claude 위치를 찾아야 해요. 설정 창에서 확인해 주세요.');
   if (process.platform !== 'win32') return t('터미널에서 claude auth login 을 실행해 주세요.');
   const [cmd, args] = command(claude.path, []);
   // claude 경로는 환경 변수로 넘긴다. start 줄에 따옴표 친 인자가 더 붙으면 cmd 가 따옴표를 엉뚱하게 벗겨 낸다.
   const env = { ...childEnv(), LOGIN_CLAUDE: cmd, LOGIN_CLAUDE_ARG: args.map(a => `"${a}"`).join(' ') };
-  spawn('cmd.exe', ['/d', '/c', `start "Claude 로그인" "${path.join(ROOT, '로그인.bat')}"`], {
+  spawn('cmd.exe', ['/d', '/c', `start "Claude login" "${path.join(ROOT, 'login.bat')}"`], {
     env, windowsVerbatimArguments: true, detached: true, stdio: 'ignore', windowsHide: true,
   }).unref();
   stopLoginWatch();
@@ -661,7 +656,7 @@ function openCodexLogin() {
   const [cmd, args] = command(codex.path, []);
   // 경로는 환경 변수로 넘긴다 (start 줄에 따옴표 친 인자가 더 붙으면 cmd 가 따옴표를 엉뚱하게 벗겨 낸다)
   const env = { ...childEnv(), LOGIN_KIND: 'codex', LOGIN_CODEX: cmd, LOGIN_CODEX_ARG: args.map(a => `"${a}"`).join(' ') };
-  spawn('cmd.exe', ['/d', '/c', `start "GPT 로그인" "${path.join(ROOT, '로그인.bat')}"`], {
+  spawn('cmd.exe', ['/d', '/c', `start "GPT login" "${path.join(ROOT, 'login.bat')}"`], {
     env, windowsVerbatimArguments: true, detached: true, stdio: 'ignore', windowsHide: true,
   }).unref();
   secLog('login', { what: 'codex' });
@@ -2502,7 +2497,7 @@ function serveLocked(res) {
   res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' });
   res.end(`<!doctype html><html lang="${settings.lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${t('클로드 관제실')}</title>
 <body style="margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;background:#141413;color:#ece9e2;font:15px/1.6 system-ui,sans-serif;text-align:center">
-<div><h1 style="font-size:19px;margin:0 0 8px">${t('이 창에는 열쇠가 없어요')}</h1><p style="margin:0;color:#a39e93">${t('관제실을 켤 때처럼 실행.bat(바탕화면의 클로드 관제실)을 다시 눌러 주세요. 열쇠가 든 새 창이 열려요.')}</p></div>`);
+<div><h1 style="font-size:19px;margin:0 0 8px">${t('이 창에는 열쇠가 없어요')}</h1><p style="margin:0;color:#a39e93">${t('관제실을 켤 때처럼 run.bat(또는 바탕화면 바로가기)을 다시 실행해 주세요. 열쇠가 든 새 창이 열려요.')}</p></div>`);
 }
 
 function openStream(req, res) {

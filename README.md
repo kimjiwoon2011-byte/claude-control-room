@@ -17,7 +17,7 @@ Run up to 8 Claude Code agents side by side from one window, with a read-only su
 - **Hand over (⇄).** Move an agent's current or failed task to another AI. The new AI first gets a handoff note (last task, last message, edited files) so it continues instead of starting over.
 - **Attach files.** Click the paperclip, drag files onto the prompt box, or paste a copied image with Ctrl+V. When you send, the files are put in each receiving agent's work folder under `attachments/` and the task lists their paths; GPT agents also get pictures as images. Up to 10 files per send, 25 MB each.
 - **See the result right away.** When an agent finishes a task that made or changed a web page (`.html`), the page opens in a preview panel on the right. Reopen it later from History. The preview comes from a separate local address, so the page can't touch the control room. It also blocks the usual ways a page could send your files out: connections, form posts, and moving itself to another address. Only common script and font CDNs are allowed. A few rare channels (such as WebRTC) aren't covered. Open pages that need the internet from the work folder (📂 in the panel).
-- **Six languages**: Korean, English, Japanese, Simplified Chinese, French and German. Pick one on first run (it defaults to your PC's language) and change it in Settings. The instructions the app gives agents and the supervisor switch too, so they answer in that language.
+- **Six languages**: Korean, English, Japanese, Simplified Chinese, French and German. It starts in English; pick another language on the first-run screen or in Settings. The instructions the app gives agents and the supervisor switch too, so they answer in that language.
 - **Small comforts.** Desktop notifications while you're in another window (off by default), a list of queued tasks you can remove from (click "Queued N" on an agent), earlier prompts with ↑/↓, and a "Copy diagnostics" button for bug reports that leaves out your prompts and keys.
 - **A lively screen.** A pixel starfield behind the prompt, a dot orbiting the mascot for each working agent, light sweeping across working panes, and confetti when a task finishes. One switch in Settings turns the effects off, and they follow your system's "reduce motion" setting.
 
@@ -32,7 +32,7 @@ Run up to 8 Claude Code agents side by side from one window, with a read-only su
 ## Quick start
 
 1. Download or clone this folder.
-2. On Windows, double-click **`실행.bat`** ("run"). On other systems, run `node server.js` (or `npm start`).
+2. On Windows, double-click **`run.bat`**. On other systems, run `node server.js` (or `npm start`).
 3. The control room opens at `http://127.0.0.1:7707`. On first run, pick the language, the **work folder** (where agents create files) and the **data folder** (settings and history).
 4. If Claude Code isn't logged in yet, press **Open login window** in Settings (Windows) or run `claude auth login`.
 
@@ -73,7 +73,7 @@ Runs on Node's built-in test runner with nothing to install. Each test starts th
 ## Security
 
 - The server only listens on `127.0.0.1` and only answers requests addressed to this PC (`Host` check).
-- Every API call needs a random key that changes each time the app starts, and only the window the app opens gets it: the window comes in through a one-time link, receives a session cookie, and only a page loaded with that cookie contains the key. Simply reading the page gives no key, so neither another website nor another program on this PC can drive your agents. That includes a GPT agent in the "unelevated" sandbox below, which can still reach `127.0.0.1`. Running `실행.bat` again while the app is running opens a fresh window. It does this by leaving a note in the data folder, which sandboxed GPT agents can't write to.
+- Every API call needs a random key that changes each time the app starts, and only the window the app opens gets it: the window comes in through a one-time link, receives a session cookie, and only a page loaded with that cookie contains the key. Simply reading the page gives no key, so neither another website nor another program on this PC can drive your agents. That includes a GPT agent in the "unelevated" sandbox below, which can still reach `127.0.0.1`. Running `run.bat` again while the app is running opens a fresh window. It does this by leaving a note in the data folder, which sandboxed GPT agents can't write to.
 - Approvals stay with you, and the supervisor can only read files.
 - GPT agents run in Codex's sandbox: read-only for the "Plan only" and "Ask every time" permissions, otherwise write access inside the work folder only. On Windows the app checks at start, without calling the AI, whether Codex's newer **mxc** sandbox works on this PC and uses it if so. mxc blocks connections to this PC (`127.0.0.1`, so GPT can't reach the app or claude-code-router) and to the internet, and keeps Korean text intact. Otherwise it falls back to the "unelevated" sandbox, which blocks neither: its internet block only points proxy settings at a dead address. The black server window shows which one is in use. With mxc, GPT also **can't read** your Claude and Codex login files, SSH/git/cloud/npm credentials, claude-code-router's settings (other AI keys) or the control room's data folder. The block is enforced by Windows: a real GPT trying to read got "Access is denied". Other files your account can read are still readable, and what GPT reads goes to OpenAI as part of the conversation. In unelevated mode, which Codex doesn't support for this block, it can read everything. Don't give GPT agents files, web pages or repositories you don't trust. ("elevated", the third option, can read just as much, didn't block connections to this PC in a quick test, and breaks Korean in read-only mode.)
 - Some places can't be work folders: the top of a drive, your whole user folder, any folder that contains the app folder or the data folder, and anything inside the data folder. Agents write freely in their work folder, so these would let them change files all over the PC, or edit `server.js` so that it runs outside the sandbox the next time you start the app. Subfolders, such as `작업실` inside the app folder, are fine. A work folder like this saved earlier stops tasks from starting.
@@ -91,7 +91,7 @@ The app itself is free and has no backend. Agents use your own Claude plan's usa
 - `server.js` — the Node server (no dependencies). Runs one CLI process per agent and talks to the page over Server-Sent Events.
 - `index.html` — the whole UI.
 - `locales/` — translations, one dictionary per language (`en.json`, `ja.json`, `zh.json`, `fr.json`, `de.json`). The Korean sentence in the code is the key.
-- `실행.bat` / `로그인.bat` — Windows launchers ("run" / "log in").
+- `run.bat` / `login.bat` — Windows launchers (start the app / log in).
 - `tests/` — the test suite and the fake CLIs it uses. `package.json` only holds the version and the `npm start` / `npm test` shortcuts.
 - `icon.ico` — app icon.
 

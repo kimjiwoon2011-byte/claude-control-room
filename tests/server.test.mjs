@@ -941,15 +941,19 @@ test('이미 관제실 기록이 있는 폴더로는 기록 폴더를 옮기지 
   });
 });
 
-test('처음 켜면 설정이 안 끝난 상태이고, /api/setup 이 언어·작업 폴더·기록 폴더를 한 번에 정한다', async () => {
+test('처음 켜면 PC 언어와 상관없이 영어로, 설정이 안 끝난 상태이고, /api/setup 이 언어·작업 폴더·기록 폴더를 한 번에 정한다', async () => {
   await withServer({ seed: false }, async srv => {
-    assert.equal((await srv.state()).settings.setupDone, false);
+    const first = await srv.state();
+    assert.equal(first.settings.setupDone, false);
+    assert.equal(first.settings.lang, 'en');
+    assert.equal(first.agents[0].name, 'Claude 1');
     const work = path.join(srv.home, 'my work');
     const data = path.join(srv.home, 'my data');
-    await srv.api('POST', '/api/setup', { lang: 'en', defaultCwd: work, dataDir: data });
+    await srv.api('POST', '/api/setup', { lang: 'ko', defaultCwd: work, dataDir: data });
     const s = await srv.state();
     assert.equal(s.settings.setupDone, true);
-    assert.equal(s.agents[0].name, 'Claude 1');
+    assert.equal(s.settings.lang, 'ko');
+    assert.equal(s.agents[0].name, '클로드 1');
     assert.deepEqual([...new Set(s.agents.map(a => a.cwd))], [work]);
     assert.ok(fs.statSync(work).isDirectory());
     assert.equal(s.app.dataDir, data);
