@@ -377,6 +377,26 @@ test('보안 기록: 허락·막은 일·위험한 설정 바꾸기·열쇠 없�
   }
 });
 
+test('앱을 끄면 하던 일(허락을 기다리던 일 포함)은 오류가 아니라 중지로 남는다', async () => {
+  const home = tempDir();
+  seed(home, { agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] });
+  let srv = await startServer({ home });
+  try {
+    await send(srv, '파일 살펴봐 줘');   // 가짜 claude 는 npm test 를 돌려도 되는지 허락을 구하고 기다린다
+    await send(srv, '기다려', 'a2');
+    await srv.until(st => agentOf(st, 'a1').pending.length && said(st, 'a2').includes('일하는 중이에요.'), '허락 대기·일하는 중');
+    await srv.stop();
+    srv = await startServer({ home });
+    const s = await srv.state();
+    assert.deepEqual(s.history.map(h => [h.agentId, h.status]).sort(), [['a1', 'stopped'], ['a2', 'stopped']]);
+    assert.deepEqual(s.history.map(h => h.result), ['앱을 꺼서 멈췄어요', '앱을 꺼서 멈췄어요'], '기록에 멈춘 까닭이 남는다');
+    for (const id of ['a1', 'a2']) assert.ok(!logOf(s, id).some(e => /예기치 않게/.test(e.text || '')), `${id}: '예기치 않게 꺼졌어요'가 남았다`);
+  } finally {
+    await srv.stop();
+    removeDir(home);
+  }
+});
+
 test('팀 게시판: 팀장의 약속이 첫 글, 일꾼은 게시판을 받아 일하고 끝나면 [게시판] 소식을 올리며, 뒤 조각은 앞 소식을 받는다 (.team-board.md·결과 모으기에도)', async () => {
   const seedTeam = { settings: { lead: { enabled: true, approve: false } }, agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] };
   await withServer({ seed: seedTeam }, async srv => {

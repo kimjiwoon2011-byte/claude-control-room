@@ -801,5 +801,6 @@
   "약속": "Absprache",
   "팀 게시판": "Team-Pinnwand",
   "(관제실이 쓰는 파일이에요. 읽기만 하고 고치지 마세요.)": "(Der Kontrollraum schreibt diese Datei. Lies sie, bearbeite sie nicht.)",
-  "자동 요약": "Auto-Zusammenfassung"
+  "자동 요약": "Auto-Zusammenfassung",
+  "앱을 꺼서 멈췄어요": "Gestoppt, weil die App beendet wurde"
 }

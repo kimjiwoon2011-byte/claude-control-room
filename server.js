@@ -3076,8 +3076,10 @@ function shutdown() {
   if (closing) return;
   closing = true;
   console.log(t('끄는 중이에요…'));
+  for (const a of allAgents()) a.queue = [];
   for (const a of allAgents()) {
-    a.queue = [];
+    // 하던 일은 프로세스를 끄기 전에 '중지'로 마무리한다 — 그냥 끄면 '예기치 않게 꺼졌어요' 오류로 남는다
+    if (a.current) endTurn(a, { status: 'stopped', text: t('앱을 꺼서 멈췄어요') });
     if (a.proc) killProc(a);
   }
   if (ccrProc) forceKill(ccrProc);   // 관제실이 켠 CCR(과 게이트웨이)도 같이 끈다

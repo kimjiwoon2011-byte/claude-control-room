@@ -801,5 +801,6 @@
   "약속": "agreement",
   "팀 게시판": "Team board",
   "(관제실이 쓰는 파일이에요. 읽기만 하고 고치지 마세요.)": "(The control room writes this file. Read it, don't edit it.)",
-  "자동 요약": "auto summary"
+  "자동 요약": "auto summary",
+  "앱을 꺼서 멈췄어요": "Stopped because the app was closed"
 }
