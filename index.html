@@ -1300,7 +1300,7 @@
           </section>
           <section class="group">
             <h2 translate="no">언어 · Language</h2>
-            <div class="kv"><span class="k">화면 언어</span><span class="v"><select id="optLang" translate="no"><option value="ko">한국어</option><option value="en">English</option></select></span></div>
+            <div class="kv"><span class="k">화면 언어</span><span class="v"><select id="optLang" translate="no"><option value="ko">한국어</option><option value="en">English</option><option value="ja">日本語</option><option value="zh">简体中文</option><option value="fr">Français</option><option value="de">Deutsch</option></select></span></div>
             <p class="note">화면 글자와 에이전트·감독관에게 주는 안내문이 이 언어로 바뀌어요. 바꾸면 화면을 새로 불러와요.</p>
           </section>
           <section class="group">
@@ -1449,7 +1449,7 @@
     <div id="setupMascot"></div>
     <h1 id="setupTitle">클로드 관제실에 오신 걸 환영해요!</h1>
     <p class="note">처음 한 번만 정하면 돼요. 나중에 설정 창에서 언제든 바꿀 수 있어요.</p>
-    <label class="field"><span class="lbl" translate="no">언어 · Language</span><select id="setupLang" translate="no"><option value="ko">한국어</option><option value="en">English</option></select></label>
+    <label class="field"><span class="lbl" translate="no">언어 · Language</span><select id="setupLang" translate="no"><option value="ko">한국어</option><option value="en">English</option><option value="ja">日本語</option><option value="zh">简体中文</option><option value="fr">Français</option><option value="de">Deutsch</option></select></label>
     <div class="field"><span class="lbl">작업 폴더 <small class="help">· 에이전트가 만드는 파일이 저장되는 곳</small></span><div class="row"><input id="setupCwd" spellcheck="false"><button class="btn" data-setup-pick="work">폴더 고르기</button></div></div>
     <div class="field"><span class="lbl">기록 폴더 <small class="help">· 설정·기록·감독관 보고를 저장하는 곳</small></span><div class="row"><input id="setupData" spellcheck="false"><button class="btn" data-setup-pick="data">폴더 고르기</button></div></div>
     <button class="btn primary" id="setupGo">시작하기</button>
@@ -1496,13 +1496,13 @@
 const TOKEN = document.querySelector('meta[name="agent-token"]').content;
 // 언어: 서버가 화면을 보낼 때 언어와 영어 사전을 심어 준다. 사전에 없는 글은 한국어 그대로 보인다 ({이름} 자리에 값을 넣는다)
 // 열쇠 끝의 '#이름'은 같은 한국어를 자리에 따라 다른 영어로 옮길 때 붙이는 구분표다 (한국어로 보일 때는 떼어 낸다)
-const LANG = /^(ko|en)$/.test('__APP_LANG__') ? '__APP_LANG__' : 'ko';
+const LANG = /^(ko|en|ja|zh|fr|de)$/.test('__APP_LANG__') ? '__APP_LANG__' : 'ko';
 const DICT = /*__I18N__*/null;
 const t = (ko, vars) => {
   const s = DICT?.[ko] ?? ko.replace(/#\w+$/, '');
   return vars ? s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m)) : s;
 };
-const LOCALE = LANG === 'ko' ? 'ko-KR' : 'en-US';
+const LOCALE = { ko: 'ko-KR', en: 'en-US', ja: 'ja-JP', zh: 'zh-CN', fr: 'fr-FR', de: 'de-DE' }[LANG];
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

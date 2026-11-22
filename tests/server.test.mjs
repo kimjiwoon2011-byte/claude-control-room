@@ -860,6 +860,36 @@ test('언어를 영어로 바꾸면 기본 이름, 에이전트 안내문, 화�
   });
 });
 
+test('일본어로 바꾸면 화면·안내문·오류 글이 일본어가 되고, 없는 언어는 무시하며, 한국어로 돌아오면 기본 이름도 돌아온다', async () => {
+  await withServer({ seed: { agents: [{ id: 'a1', name: '클로드 1' }, { id: 'a2', name: '내 일꾼' }] } }, async srv => {
+    await srv.api('POST', '/api/settings', { lang: 'ja' });
+    let s = await srv.state();
+    assert.equal(s.settings.lang, 'ja');
+    assert.equal(agentOf(s, 'a1').name, 'Claude 1');
+    assert.equal(agentOf(s, 'a2').name, '내 일꾼', '사용자가 지은 이름은 그대로');
+    assert.equal(s.supervisor.name, '監督');
+    await send(srv, '설정 보기');
+    s = await srv.until(st => idle('a1')(st) && st.history.length === 1, '일이 끝남');
+    const note = said(s, 'a1')[0];
+    assert.match(note, /note=/);
+    assert.ok(!/[가-힣]/.test(note.split('note=')[1]), note);
+    assert.match(await (await fetch(`${srv.base}/`)).text(), /<html lang="ja">/, '열쇠 없는 안내 화면도 일본어');
+    const page = await (await fetch(`${srv.base}/`, { headers: { cookie: srv.cookie } })).text();
+    assert.ok(page.includes('"클로드 관제실":"Claude 管制室"'), '일본어 사전이 화면에 들어간다');
+    const bad = await srv.raw('POST', '/api/send', { text: '' });
+    assert.equal(bad.status, 400);
+    assert.ok(!/[가-힣]/.test(bad.body.error) && /[぀-ヿ一-鿿]/.test(bad.body.error), bad.body.error);
+
+    await srv.api('POST', '/api/settings', { lang: 'xx' });
+    assert.equal((await srv.state()).settings.lang, 'ja', '없는 언어는 무시한다');
+
+    await srv.api('POST', '/api/settings', { lang: 'ko' });
+    s = await srv.state();
+    assert.equal(agentOf(s, 'a1').name, '클로드 1');
+    assert.equal(s.supervisor.name, '감독관');
+  });
+});
+
 test('기록 폴더를 옮기면 새 폴더에 쓰고 예전 파일은 지우며, 다시 켜도 옮긴 곳에서 읽는다', async () => {
   const home = tempDir();
   seed(home);

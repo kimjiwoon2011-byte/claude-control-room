@@ -17,7 +17,7 @@ Run up to 8 Claude Code agents side by side from one window, with a read-only su
 - **Hand over (⇄).** Move an agent's current or failed task to another AI. The new AI first gets a handoff note (last task, last message, edited files) so it continues instead of starting over.
 - **Attach files.** Click the paperclip, drag files onto the prompt box, or paste a copied image with Ctrl+V. When you send, the files are put in each receiving agent's work folder under `attachments/` and the task lists their paths; GPT agents also get pictures as images. Up to 10 files per send, 25 MB each.
 - **See the result right away.** When an agent finishes a task that made or changed a web page (`.html`), the page opens in a preview panel on the right. Reopen it later from History. The preview comes from a separate local address, so the page can't touch the control room. It also blocks the usual ways a page could send your files out: connections, form posts, and moving itself to another address. Only common script and font CDNs are allowed. A few rare channels (such as WebRTC) aren't covered. Open pages that need the internet from the work folder (📂 in the panel).
-- **Korean / English UI**, picked on first run and changeable in Settings.
+- **Six languages**: Korean, English, Japanese, Simplified Chinese, French and German. Pick one on first run (it defaults to your PC's language) and change it in Settings. The instructions the app gives agents and the supervisor switch too, so they answer in that language.
 - **Small comforts.** Desktop notifications while you're in another window (off by default), a list of queued tasks you can remove from (click "Queued N" on an agent), earlier prompts with ↑/↓, and a "Copy diagnostics" button for bug reports that leaves out your prompts and keys.
 - **A lively screen.** A pixel starfield behind the prompt, a dot orbiting the mascot for each working agent, light sweeping across working panes, and confetti when a task finishes. One switch in Settings turns the effects off, and they follow your system's "reduce motion" setting.
 
@@ -45,7 +45,7 @@ Closing the server window quits the app.
 | Files the agents create | The work folder (default `workspace/`; change it in Settings → Storage or per agent) |
 | Settings, history, supervisor reports | The data folder (default `data/`: `state.json`, `logs.json`) |
 | Location of a custom data folder | `config.json` in the app folder |
-| English translations | `locales/en.json` |
+| Translations | `locales/` (`en`, `ja`, `zh`, `fr`, `de`) |
 
 The data folder can contain the claude-code-router key in plain text, so keep it private. `data/`, `config.json` and the work folders are listed in `.gitignore`.
 
@@ -68,7 +68,7 @@ node server.js [--port 7707] [--no-open] [--no-ccr] [--home <folder>] [--data <f
 npm test
 ```
 
-Runs on Node's built-in test runner with nothing to install. Each test starts the real server in a temporary folder (`--home`) with fake `claude` and `codex` CLIs from `tests/`, so it never touches your login, your usage, your data folder or a running claude-code-router. It covers sending tasks, approvals, the supervisor's fix rounds, hand-overs, the usage-limit fallback, language switching and moving the data folder, plus checks that every on-screen string has an English translation.
+Runs on Node's built-in test runner with nothing to install. Each test starts the real server in a temporary folder (`--home`) with fake `claude` and `codex` CLIs from `tests/`, so it never touches your login, your usage, your data folder or a running claude-code-router. It covers sending tasks, approvals, the supervisor's fix rounds, hand-overs, the usage-limit fallback, language switching and moving the data folder, plus checks that every on-screen string is translated into every language.
 
 ## Security
 
@@ -90,14 +90,16 @@ The app itself is free and has no backend. Agents use your own Claude plan's usa
 
 - `server.js` — the Node server (no dependencies). Runs one CLI process per agent and talks to the page over Server-Sent Events.
 - `index.html` — the whole UI.
-- `locales/en.json` — English translations. The Korean sentence in the code is the key.
+- `locales/` — translations, one dictionary per language (`en.json`, `ja.json`, `zh.json`, `fr.json`, `de.json`). The Korean sentence in the code is the key.
 - `실행.bat` / `로그인.bat` — Windows launchers ("run" / "log in").
 - `tests/` — the test suite and the fake CLIs it uses. `package.json` only holds the version and the `npm start` / `npm test` shortcuts.
 - `icon.ico` — app icon.
 
 ## Translations
 
-All user-facing text goes through `t('한국어 문장', { vars })`: the Korean sentence is the key and `locales/en.json` maps it to English, with `{name}`-style placeholders. Restart the server after editing the dictionary. Adding a third language currently needs small code changes (`LANGS` and `DICTS` in `server.js`, `LANG` in `index.html`, and the language selects).
+All user-facing text goes through `t('한국어 문장', { vars })`: the Korean sentence is the key and `locales/<language>.json` maps it to that language, with `{name}`-style placeholders. `en.json` is the reference: every other dictionary must have exactly its keys, and a string missing from one falls back to English. Restart the server after editing a dictionary. The Japanese, Chinese, French and German dictionaries were translated by AI (Claude) and may read unnaturally in places; corrections are welcome.
+
+To add a language: add its code to `LANGS` in `server.js`, to `LANG` and `LOCALE` in `index.html`, and as an option in both language selects (`#optLang`, `#setupLang`), then create `locales/<code>.json` with every key from `en.json`. `npm test` checks that the keys, `{placeholders}` and HTML tags match and that no Korean is left.
 
 ## Known limitations
 

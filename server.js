@@ -145,11 +145,19 @@ const cleanText = t => String(t || '').replace(/\r\n?/g, '\n').trim().slice(0, 2
 const stripAnsi = s => String(s).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');   // 명령 출력에 섞인 글자색 코드 지우기
 
 // ── 언어: 한국어 글을 그대로 열쇠로 쓰고, 다른 언어는 locales/<언어>.json 사전에서 찾는다 (사전에 없으면 한국어 그대로) ──
-const LANGS = ['ko', 'en'];
-const DICTS = { en: readJson(path.join(ROOT, 'locales', 'en.json')) || {} };
+const LANGS = ['ko', 'en', 'ja', 'zh', 'fr', 'de'];   // 한국어 글이 열쇠이고, 다른 언어는 locales/<언어>.json 사전 하나씩
+const DICTS = Object.fromEntries(LANGS.filter(l => l !== 'ko').map(l => [l, readJson(path.join(ROOT, 'locales', `${l}.json`)) || {}]));
 const fill = (s, vars) => (vars ? s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m)) : s);
-const t = (ko, vars) => fill(DICTS[settings.lang]?.[ko] ?? ko, vars);   // {name} 자리에 값을 넣는다. 한국어 조사는 값으로 따로 넘긴다
-const osLang = () => (/^ko/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ? 'ko' : 'en');
+// {name} 자리에 값을 넣는다. 한국어 조사는 값으로 따로 넘긴다. 다른 언어 사전에 빠진 글은 영어로 보여 준다
+const t = (ko, vars) => fill(settings.lang === 'ko' ? ko : DICTS[settings.lang]?.[ko] ?? DICTS.en[ko] ?? ko, vars);
+// 처음 켤 때의 언어: PC 언어가 관제실에 있으면 그것, 없으면 영어
+const osLang = () => {
+  const p = String(Intl.DateTimeFormat().resolvedOptions().locale || '').slice(0, 2).toLowerCase();
+  return LANGS.includes(p) ? p : 'en';
+};
+// 기본 이름(클로드 N)을 어느 언어로 적었든 알아본다 — 언어를 바꿀 때 기본 이름만 새 언어로 바꾸려고
+const DEFAULT_NAME = new RegExp(`^(?:${[...new Set(['클로드 {n}', ...Object.values(DICTS).map(d => d['클로드 {n}']).filter(Boolean)])]
+  .map(s => s.replace(/[.*+?^$()|[\]\\]/g, '\\$&').replace('{n}', '(\\d+)')).join('|')})$`);
 
 // ───────────────────────── 저장 ─────────────────────────
 
@@ -2466,7 +2474,8 @@ function serveIndex(res) {
       'Content-Security-Policy': previewPort ? `frame-src http://127.0.0.1:${previewPort} http://localhost:${previewPort}` : "frame-src 'none'",
     });
     // 화면에 열쇠·언어·사전을 심는다. 사전은 한국어가 아닐 때만 넣는다 (</script> 가 섞이지 않게 < 를 바꿔 쓴다)
-    const dict = settings.lang === 'ko' ? 'null' : JSON.stringify(DICTS[settings.lang] || {}).replace(/</g, '\\u003c');
+    // 영어가 아니면 영어 사전 위에 그 언어 사전을 얹는다 (빠진 글은 영어로)
+    const dict = settings.lang === 'ko' ? 'null' : JSON.stringify({ ...DICTS.en, ...DICTS[settings.lang] }).replace(/</g, '\\u003c');
     res.end(html.replace('__AGENT_TOKEN__', TOKEN).replaceAll('__APP_LANG__', settings.lang).replace('/*__I18N__*/null', () => dict));
   });
 }
@@ -2491,7 +2500,7 @@ function enterWithCode(res, k) {
 function serveLocked(res) {
   secLog('auth', { what: 'page' }, 'auth-page');
   res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' });
-  res.end(`<!doctype html><html lang="${settings.lang === 'en' ? 'en' : 'ko'}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${t('클로드 관제실')}</title>
+  res.end(`<!doctype html><html lang="${settings.lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${t('클로드 관제실')}</title>
 <body style="margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;background:#141413;color:#ece9e2;font:15px/1.6 system-ui,sans-serif;text-align:center">
 <div><h1 style="font-size:19px;margin:0 0 8px">${t('이 창에는 열쇠가 없어요')}</h1><p style="margin:0;color:#a39e93">${t('관제실을 켤 때처럼 실행.bat(바탕화면의 클로드 관제실)을 다시 눌러 주세요. 열쇠가 든 새 창이 열려요.')}</p></div>`);
 }
@@ -2720,8 +2729,8 @@ function setLang(lang) {
   settings.lang = lang;
   for (const s of staffList()) s.name = t(STAFF_NAME[s.staff]);
   for (const a of agents) {
-    const m = a.name.match(/^(?:클로드|Claude) (\d+)$/);
-    if (m) a.name = t('클로드 {n}', { n: m[1] });
+    const m = a.name.match(DEFAULT_NAME);
+    if (m) a.name = t('클로드 {n}', { n: m.slice(1).find(Boolean) });
   }
   for (const a of allAgents()) {
     if (a.proc && a.proc.mode !== 'codex') { if (a.current) a.dirty = true; else closeProc(a); }
