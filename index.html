@@ -1372,7 +1372,7 @@
             <h2>어떻게 돌아가나요?</h2>
             <ol>
               <li data-i18n="help-how-1">에이전트 1명은 이 PC에서 따로 도는 <b>Claude Code</b> 1개예요. 최소 1명, 최대 8명까지 동시에 일해요.</li>
-              <li data-i18n="help-how-2"><b>프롬프트</b> 창에 시킬 일을 적고 보낼 곳을 골라요. <b>자동 배정</b>은 가장 한가한 에이전트에게, <b>전체</b>는 모두에게 같은 일을 보내요.</li>
+              <li data-i18n="help-how-2"><b>프롬프트</b> 창에 시킬 일을 적고 보낼 곳을 골라요. <b>자동 배정</b>은 가장 한가한 에이전트에게 보내요. <b>다 같이</b>는 팀장이 일을 나눠 맡겨서 하나로 모으고, <b>각자 따로</b>는 모두에게 같은 일을 보내 각자 만들어요.</li>
               <li data-i18n="help-how-3"><b>작업 현황</b> 창에서 에이전트들이 파일을 읽고 고치는 모습을 실시간으로 봐요. 칸마다 아래쪽 입력줄로 그 에이전트에게만 이어서 말할 수 있어요.</li>
               <li data-i18n="help-how-4">명령 실행처럼 조심해야 하는 일은 오른쪽 아래에 <b>허락 요청</b>이 떠요.</li>
             </ol>
@@ -1422,7 +1422,7 @@
           <article class="help-card">
             <h2>팀장과 검사 팀</h2>
             <ul>
-              <li data-i18n="help-team-1"><b>팀장</b> — 보낼 곳에서 <b>팀장에게</b>를 고르고 큰 일을 보내면, 팀장이 일꾼들에게 나눌 계획을 세워요. 계획을 보고 <b>이대로 시작</b>을 누르면 나눠 맡기고, 다 끝나면 결과를 모아 보고해요.</li>
+              <li data-i18n="help-team-1"><b>팀장</b> — 보낼 곳에서 <b>다 같이</b>를 고르고 큰 일을 보내면, 팀장이 일꾼들에게 나눌 계획을 세워요. 계획을 보고 <b>이대로 시작</b>을 누르면 나눠 맡기고, 다 끝나면 결과를 모아 보고해요.</li>
               <li data-i18n="help-team-2"><b>감독관 → 보안 검사관 → 테스터</b> — 파일을 고치거나 명령을 실행한 일을 차례로 검사해요. 한 자리라도 고칠 점을 찾으면 그 일꾼이 고치고, 처음 자리부터 다시 봐요.</li>
               <li data-i18n="help-team-3"><b>테스터</b>는 실제로 명령을 돌려 봐서 명령마다 허락을 물어요(GPT로 고르면 작업 폴더 안에서는 묻지 않아요). <b>보안 검사관</b>은 코드에 적힌 열쇠나 위험한 명령을 찾아요.</li>
               <li>새 자리는 처음엔 꺼져 있어요. 켤수록 일 하나에 드는 AI 사용량이 늘어요. 에이전트 관리 창에서 켜고 꺼요.</li>
@@ -1941,7 +1941,6 @@ function onMessage(m) {
     case 'settings':
       if (m.settings.lang && m.settings.lang !== LANG) { location.reload(); return; }   // 언어를 바꾸면 그 언어로 화면을 다시 불러온다
       S.settings = m.settings;
-      fixSelections();   // 팀장을 끄면 '팀장에게' 고른 것을 되돌린다
       renderSettings();
       renderStaff();
       renderStaffCards();
@@ -1978,7 +1977,6 @@ function onMessage(m) {
 // 에이전트 목록이 바뀌면 사라진 에이전트를 가리키던 선택을 정리
 function fixSelections() {
   if (S.focus && !agentById(S.focus)) S.focus = null;
-  if (S.target === 'lead' && !staffOn('lead')) S.target = 'auto';
   if (Array.isArray(S.target)) {
     S.target = S.target.filter(id => agentById(id));
     if (!S.target.length) S.target = 'auto';
@@ -2419,11 +2417,11 @@ function skyKick() {
   sky.raf = requestAnimationFrame(skyDraw);
 }
 
-// 보낼 곳 버튼에 보이는 글자: 자동 배정 / 전체 N명 / 팀장에게 / 고른 일꾼 (세 명부터는 '외 N명')
+// 보낼 곳 버튼에 보이는 글자: 자동 배정 / 다 같이 N명 / 각자 따로 N명 / 고른 일꾼 (세 명부터는 '외 N명')
 function targetText() {
   const tgt = S.target;
-  if (tgt === 'all') return t('전체 {n}명', { n: S.agents.length });
-  if (tgt === 'lead') return t('팀장에게');
+  if (tgt === 'all') return t('다 같이 {n}명', { n: S.agents.length });
+  if (tgt === 'each') return t('각자 따로 {n}명', { n: S.agents.length });
   const names = Array.isArray(tgt) ? tgt.map(agentById).filter(Boolean).map(a => a.name) : [];
   if (!names.length) return t('자동 배정');
   return names.length <= 2 ? names.join('·') : t('{name} 외 {n}명', { name: names[0], n: names.length - 1 });
@@ -2444,14 +2442,15 @@ function renderTargets() {
   if (!$('#targetMenu').hidden) renderTargetMenu();
 }
 
-// 보낼 곳 메뉴: 자동·전체·팀장은 하나만, 일꾼은 여러 명을 켜고 끈다 (고른 것 앞에 ✓)
+// 보낼 곳 메뉴: 자동·다 같이·각자 따로는 하나만, 일꾼은 여러 명을 켜고 끈다 (고른 것 앞에 ✓)
+// '다 같이'는 팀장이 나눠 맡기고 하나로 모은다 (팀장 자리를 꺼 두어도). '각자 따로'는 예전 '전체' — 모두에게 같은 글
 function renderTargetMenu() {
   const tgt = S.target;
   const tick = on => `<span class="tick">${on ? '✓' : ''}</span>`;
   const one = (v, on, label, title) => `<button type="button" role="menuitemradio" aria-checked="${on}" data-t="${v}" title="${esc(title)}">${tick(on)}${esc(label)}</button>`;
   $('#targetMenu').innerHTML = one('auto', tgt === 'auto', t('자동 배정'), t('가장 한가한 에이전트 한 명에게 보내요'))
-    + one('all', tgt === 'all', t('전체 {n}명', { n: S.agents.length }), t('모든 에이전트에게 똑같이 보내요'))
-    + (staffOn('lead') ? one('lead', tgt === 'lead', t('팀장에게'), t('팀장이 계획을 세워서 일꾼들에게 나눠 맡겨요')) : '')
+    + one('all', tgt === 'all', t('다 같이 {n}명', { n: S.agents.length }), t('팀장이 일을 나눠 맡기고, 끝나면 하나로 모아요'))
+    + one('each', tgt === 'each', t('각자 따로 {n}명', { n: S.agents.length }), t('모두에게 같은 일을 보내서 각자 만들어요. 비교용이에요 — 같은 폴더면 서로 덮어쓸 수 있어요'))
     + `<div class="t-sep">${t('골라서 보내기')}</div>`
     + S.agents.map(a => {
       const on = Array.isArray(tgt) && tgt.includes(a.id);
@@ -2585,7 +2584,7 @@ function renderStaff() {
 // 에이전트 관리 창의 관리 자리 카드: 자리마다 켜기 설명과 도움말
 const STAFF_CARD = {
   supervisor: [t('일꾼이 끝낸 일을 검토하고, 고칠 점은 그 일꾼에게 다시 시키기'), t("파일을 고치거나 명령을 실행한 일만 검토해요. 감독관은 읽기만 할 수 있어서 파일을 직접 바꾸지 않고, 명령 실행 허락은 언제나 사용자가 해요. 검토할 때마다 감독관 AI(Claude 또는 GPT)의 사용량이 들어요. GPT를 고르면 '만드는 건 Claude, 검사는 GPT'로 나눠 일해요.")],
-  lead: [t('사용자가 보낸 큰 일을 나눠서 일꾼들에게 맡기기'), t('보낼 곳에서 팀장에게를 고르면 팀장이 계획을 세워요. 계획을 보고 시작하면 일꾼들에게 나눠 맡기고, 다 끝나면 결과를 모아 보고해요. 계획을 세울 때와 결과를 모을 때 팀장 AI의 사용량이 들어요.')],
+  lead: [t('사용자가 보낸 큰 일을 나눠서 일꾼들에게 맡기기'), t('보낼 곳에서 다 같이를 고르면 팀장이 계획을 세워요(이 자리를 꺼 둬도 돼요). 켜 두면 팀장 칸에서 계획과 진행을 자세히 볼 수 있어요. 계획을 세울 때와 결과를 모을 때 팀장 AI의 사용량이 들어요.')],
   security: [t('끝낸 일에서 열쇠·비밀번호·위험한 명령 같은 보안 문제 찾기'), t('감독관 다음 차례에 읽기만 해서 검사해요. 문제를 찾으면 그 일꾼에게 고치게 해요. 검사할 때마다 AI 사용량이 들어요.')],
   tester: [t('끝낸 일을 직접 실행해서 돌아가는지 확인하기'), t('검사 차례의 마지막에 시험을 돌려 봐요. Claude로 하면 명령마다 허락을 물어요. GPT로 고르면 작업 폴더 안에서는 묻지 않고 돌려요. 시험할 때마다 AI 사용량이 들어요.')],
 };
@@ -2820,17 +2819,19 @@ function planHTML(p) {
 
 function fillPlans(pane) {
   $('[data-plans]', pane).innerHTML = S.plans.length ? S.plans.map(planHTML).join('')
-    : `<div class="pane-empty">${t('아직 세운 계획이 없어요.<br>프롬프트 창의 보낼 곳에서 팀장에게를 고르고 큰 일을 보내 보세요.')}</div>`;
+    : `<div class="pane-empty">${t('아직 세운 계획이 없어요.<br>프롬프트 창의 보낼 곳에서 다 같이를 고르고 큰 일을 보내 보세요.')}</div>`;
   $('[data-tab-n]', pane).textContent = S.plans.length ? ` ${S.plans.length}` : '';
 }
 
 // 프롬프트 화면의 계획판: 진행 중이거나 30분 안에 끝난 가장 최근 계획 하나
 function renderPlanBoard() {
   const board = $('#planBoard');
-  const p = staffOn('lead') ? S.plans.find(x => PLAN_LIVE.includes(x.state) || Date.now() - (x.updatedAt || x.at) < 30 * 60 * 1000) : null;
+  // '다 같이'로 만든 계획은 팀장 자리를 꺼 두어도 여기서 보고 시작한다. 팀장 칸(모두 보기)은 켰을 때만 있다
+  const lead = staffOn('lead');
+  const p = S.plans.find(x => (lead || x.all) && (PLAN_LIVE.includes(x.state) || Date.now() - (x.updatedAt || x.at) < 30 * 60 * 1000));
   board.hidden = !p;
   if (!p) return;
-  board.innerHTML = `<div class="board-head" data-staff="lead">${mascotSVG(SUP_BODY, '', true)}<span>${t('팀장 계획')}</span><button type="button" class="link" data-plan-all>${t('모두 보기 →')}</button></div>${planHTML(p)}`;
+  board.innerHTML = `<div class="board-head" data-staff="lead">${mascotSVG(SUP_BODY, '', true)}<span>${t('팀장 계획')}</span>${lead ? `<button type="button" class="link" data-plan-all>${t('모두 보기 →')}</button>` : ''}</div>${planHTML(p)}`;
 }
 
 function renderPlans() {
@@ -3479,6 +3480,7 @@ async function sendPrompt() {
     void mate.offsetWidth;
     mate.classList.add('got');
   }
+  if (r.planId) { toast(t('팀장이 일을 나눌 계획을 세우고 있어요. 아래 계획판에 곧 떠요.'), 'ok'); return; }   // '다 같이'는 팀장에게 간다
   const names = r.sentTo.map(id => agentById(id)?.name).filter(Boolean);
   toast(names.length === S.agents.length && names.length > 1 ? t('에이전트 {n}명 모두에게 보냈어요', { n: names.length }) : t('{names}에게 보냈어요', { names: names.join(', ') }), 'ok');
 }
@@ -3680,7 +3682,7 @@ function wire() {
     const item = e.target.closest('[data-t]');
     if (!item) return;
     const v = item.dataset.t;
-    if (v === 'auto' || v === 'all' || v === 'lead') {
+    if (v === 'auto' || v === 'all' || v === 'each') {
       S.target = v;
       closeMenus();
       renderTargets();

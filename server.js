@@ -1983,15 +1983,16 @@ function markPlan(id, patch) {
   return p;
 }
 
-function apiLead(text, files = []) {
-  if (!stageOn('lead')) return fail(400, t('팀장이 꺼져 있어요. 에이전트 관리 창에서 먼저 켜 주세요.'));
+// all: '다 같이'로 보낸 계획 — 팀장 자리를 꺼 두었어도 계획을 세우고 결과를 모은다
+function apiLead(text, files = [], { all = false } = {}) {
+  if (!all && !stageOn('lead')) return fail(400, t('팀장이 꺼져 있어요. 에이전트 관리 창에서 먼저 켜 주세요.'));
   // 첨부는 팀장이 읽는 기본 작업 폴더와 일꾼들의 작업 폴더마다 같은 자리(attachments/)에 넣는다 (어느 일꾼이 맡을지 아직 모른다)
   let note = '';
   for (const dir of [...new Set([settings.defaultCwd, ...agents.map(a => a.cwd)])].filter(isDir)) {
     const got = copyAttachments(files, dir);
     if (!note) note = attachNote(got);
   }
-  const p = { id: newId(), request: (text + note).slice(0, 8000), state: 'planning', plan: '', tasks: [], final: '', note: '', at: Date.now() };
+  const p = { id: newId(), request: (text + note).slice(0, 8000), state: 'planning', plan: '', tasks: [], final: '', note: '', at: Date.now(), ...(all ? { all: true } : {}) };
   plans.unshift(p);
   if (plans.length > PLAN_KEEP) plans.length = PLAN_KEEP;
   markPlan(p.id, {});
@@ -2234,7 +2235,7 @@ function planTaskEnd(pt, state, review) {
     markPlan(p.id, { state: 'stopped', note: t('나눈 일이 하나도 끝나지 못해서 결과를 모으지 않았어요') });
     return;
   }
-  if (stageOn('lead')) {
+  if (stageOn('lead') || p.all) {
     markPlan(p.id, { state: 'reporting' });
     queueLead(p, 'report');
   } else markPlan(p.id, { state: 'done', note: t('팀장이 꺼져 있어서 결과를 모으지 않았어요') });
@@ -2608,10 +2609,12 @@ function apiSend(b) {
   if (error) return fail(400, error);
   let r;
   try {
+    // '다 같이'(all): 일꾼이 둘 이상이면 팀장이 나눠 맡기고 하나로 모은다 (팀장을 꺼 두었어도). '각자 따로'(each): 모두에게 같은 글
     if (b.target === 'lead') r = apiLead(text, files);
+    else if (b.target === 'all' && agents.length > 1) r = apiLead(text, files, { all: true });
     else {
       let targets;
-      if (b.target === 'all') targets = agents.slice();
+      if (b.target === 'each' || b.target === 'all') targets = agents.slice();
       else if (Array.isArray(b.target)) targets = agents.filter(a => b.target.includes(a.id));
       else targets = [pickAgent()];
       if (!targets.length) return fail(400, t('보낼 에이전트를 골라 주세요'));

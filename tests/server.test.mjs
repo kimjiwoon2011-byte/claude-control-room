@@ -720,6 +720,42 @@ test('첨부: 에이전트가 attachments 를 작업 폴더 밖을 가리키는 
   }
 });
 
+// ───────────────────────── 보낼 곳: 다 같이 · 각자 따로 ─────────────────────────
+
+test('다 같이: 팀장이 꺼져 있어도 계획을 세우고, 시작하면 나눠 맡기고, 다 끝나면 결과를 모은다 (첨부도 일꾼 폴더에)', async () => {
+  await withServer({ seed: { settings: { lead: { enabled: false } }, agents: TWO_WORKERS } }, async srv => {
+    const up = await upload(srv, '참고.txt', '자료');
+    const r = await srv.api('POST', '/api/send', { text: '할 일 앱 만들어 줘', target: 'all', attachments: [up.body.id] });
+    assert.deepEqual(r.sentTo, ['lead']);
+    let s = await srv.until(st => st.plans[0]?.state === 'proposed', '계획이 나옴');
+    assert.equal(s.plans[0].all, true);
+    assert.ok(fs.existsSync(path.join(srv.home, 'work', 'attachments', '참고.txt')));
+    await srv.api('POST', `/api/plans/${s.plans[0].id}/start`);
+    s = await srv.until(st => st.plans[0]?.state === 'done' && idle('lead')(st), '계획 끝남', 30000);
+    assert.deepEqual(s.plans[0].tasks.map(x => x.state), ['done', 'done']);
+    assert.ok(s.plans[0].final, '팀장이 꺼져 있어도 결과를 모았다');
+  });
+});
+
+test('다 같이: 일꾼이 1명이면 계획 없이 그 한 명에게 바로 보낸다', async () => {
+  await withServer(async srv => {
+    const r = await srv.api('POST', '/api/send', { text: '빠르게 혼자 해 줘', target: 'all' });
+    assert.deepEqual(r.sentTo, ['a1']);
+    const s = await srv.until(st => idle('a1')(st) && logOf(st, 'a1').some(e => e.k === 'done'), '일 끝남');
+    assert.equal(s.plans.length, 0);
+  });
+});
+
+test('각자 따로: 모든 일꾼에게 같은 글을 그대로 보낸다 (계획 없음)', async () => {
+  await withServer({ seed: { agents: TWO_WORKERS } }, async srv => {
+    const r = await srv.api('POST', '/api/send', { text: '빠르게 시안 만들어 줘', target: 'each' });
+    assert.deepEqual(r.sentTo.sort(), ['a1', 'a2']);
+    const s = await srv.until(st => ['a1', 'a2'].every(id => idle(id)(st) && logOf(st, id).some(e => e.k === 'done')), '둘 다 끝남');
+    for (const id of ['a1', 'a2']) assert.match(logOf(s, id).find(e => e.k === 'user').text, /^빠르게 시안 만들어 줘/);
+    assert.equal(s.plans.length, 0);
+  });
+});
+
 test('관제실을 또 켜면 이미 켜진 쪽이 한 번만 쓰는 새 주소로 창을 연다 (올려 둔 첨부도 지우지 않는다)', async () => {
   await withServer(async srv => {
     const up = await upload(srv, 'a.txt', 'hi');
