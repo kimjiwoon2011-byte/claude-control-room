@@ -262,7 +262,14 @@ function loadState() {
   }
   agents = [];
   const list = Array.isArray(saved.agents) ? saved.agents.slice(0, MAX_AGENTS) : [];
-  for (const s of list) agents.push(makeAgent(s, logs[s.id]));
+  for (const s of list) {
+    const a = makeAgent(s, logs[s.id]);
+    agents.push(a);
+    // 지난번에 앱이 갑자기 꺼졌다: 그때 하던 일·기다리던 일을 '앱을 꺼서 멈춘 일'로 기록에 남긴다
+    for (const u of Array.isArray(s.unfinished) ? s.unfinished : []) {
+      if (u?.prompt) cutHistory(a, String(u.prompt), u.started ? t('앱이 갑자기 꺼져서 멈췄어요') : t('시작하기 전에 앱이 꺼졌어요'), Number(u.at) || Date.now());
+    }
+  }
   const want = list.length ? MIN_AGENTS : 4;   // 처음 켤 때는 4명으로 시작
   while (agents.length < want) agents.push(makeAgent());
   // 관리하는 자리는 일꾼 수(1~8명)에 들어가지 않는 따로 된 에이전트다. 실행·기록 방식은 일꾼과 같은 코드를 쓴다.
@@ -343,6 +350,21 @@ function save() {
   if (!saveTimer) saveTimer = setTimeout(saveNow, 500);
 }
 
+// 하던 일·기다리던 일. 정상으로 끄면 비어 있다(기록으로 옮긴다). 앱이 갑자기 꺼지면 남아 있다가 다음에 켤 때 기록이 된다
+function unfinishedOf(a) {
+  const list = [
+    ...(a.current ? [{ prompt: a.current.prompt, at: a.current.startedAt, started: true }] : []),
+    ...a.queue.map(q => ({ prompt: q.text, at: Date.now(), started: false })),
+  ].map(x => ({ ...x, prompt: String(x.prompt || '').slice(0, 20000) }));
+  return list.length ? list : undefined;
+}
+
+// 앱이 꺼져서 끝내지 못한 일을 기록에 남긴다 (홈 알림띠와 기록의 '이어서 하기'가 쓴다)
+function cutHistory(a, prompt, text, at = Date.now()) {
+  history.unshift({ id: newId(), agentId: a.id, agentName: a.name, color: a.color, prompt, result: text, status: 'stopped', at, ms: 0, tokens: { in: 0, out: 0 }, turns: null, cut: 'shutdown' });
+  if (history.length > HISTORY_KEEP) history.length = HISTORY_KEEP;
+}
+
 function saveNow(dir = DATA_DIR) {
   clearTimeout(saveTimer);
   saveTimer = null;
@@ -355,6 +377,7 @@ function saveNow(dir = DATA_DIR) {
         engine: a.engine, gptModel: a.gptModel, codexThread: a.codexThread, lastAi: a.lastAi, failedCarry: a.failedCarry || undefined,
         permissionMode: a.permissionMode, sessionId: a.sessionId, last: a.last, stats: a.stats,
         mode: a.mode, autoMode: a.autoMode, fbSessionId: a.fbSessionId, fbModel: a.fbModel,
+        unfinished: unfinishedOf(a),
       })),
       history,
       reports,
@@ -1250,7 +1273,8 @@ function onEvent(a, proc, ev) {
   }
 }
 
-function endTurn(a, { status, text = '', ev = null }) {
+// cut: 'shutdown' 이면 앱을 꺼서 멈춘 일 — 기록에 남겨 다시 켰을 때 이어서 할 수 있게 한다
+function endTurn(a, { status, text = '', ev = null, cut = '' }) {
   const cur = a.current;
   if (!cur) return;
   a.current = null;
@@ -1276,6 +1300,7 @@ function endTurn(a, { status, text = '', ev = null }) {
     const item = {
       id: newId(), agentId: a.id, agentName: a.name, color: a.color, prompt: cur.prompt,
       result: String(text || '').slice(0, 40000), status, at: cur.startedAt, ms, tokens, turns: ev?.num_turns ?? null,
+      ...(cut ? { cut } : {}),
     };
     const preview = status === 'done' ? previewOf(a, cur) : null;   // 이번 일에서 만들거나 고친 웹 페이지 (화면이 바로 띄운다)
     if (preview) item.preview = preview;
@@ -1446,6 +1471,7 @@ function pump(a) {
     commands: item.commands ? [...item.commands] : undefined,
     images: item.images,                 // GPT 에게 같이 넘길 사진 (첨부)
   };
+  save();   // 앱이 갑자기 꺼져도 하던 일이 남게 (unfinishedOf)
   if (item.review?.reportId) markReport(item.review.reportId, { state: 'reviewing', stage: a.staff });
   if (item.planTask) planTaskPatch(item.planTask, { state: item.round ? 'fixing' : 'working' });
   // 인수인계 쪽지: 지난 일과 다른 AI(Claude ↔ 대체 AI ↔ GPT)가 맡으면, 새 AI 에게 지난 일을 먼저 알려 준다
@@ -2245,6 +2271,7 @@ function enqueue(a, text, extra = {}) {
   a.queue.push({ id: newId(), text, ...extra });
   sendAgent(a);
   pump(a);
+  save();   // 앱이 갑자기 꺼져도 기다리던 일이 남게
 }
 
 function stopAgent(a) {
@@ -2373,6 +2400,26 @@ function answerPermission(a, requestId, decision) {
 const load = a => (a.current ? 1 : 0) + a.queue.length;
 function pickAgent() {
   return agents.reduce((best, a) => (load(a) < load(best) ? a : best), agents[0]);
+}
+
+// 기록의 '이어서 하기': 그 일을 했던 일꾼(없으면 가장 한가한 일꾼)에게 앞선 일·결과와 이번에 할 일을 함께 맡긴다.
+// 이어서 할 내용이 비어 있으면 멈춘 일(오류·중지)은 남은 부분을 끝내게 하고, 끝낸 일은 거절한다
+function apiContinue(id, b) {
+  const h = history.find(x => x.id === id);
+  if (!h) return fail(404, t('그 기록은 이제 없어요'));
+  const more = cleanText(b.text);
+  if (!more && h.status === 'done') return fail(400, t('이어서 시킬 일을 적어 주세요'));
+  const a = agents.find(x => x.id === h.agentId) || pickAgent();
+  enqueue(a, [
+    t('[이어서 하기] 전에 하던 일을 이어서 해요.'),
+    `## ${t('전에 시킨 일')}`, String(h.prompt || '').slice(0, 4000),
+    `## ${t('그때 결과 ({status})', { status: statusKo(h.status) })}`, String(h.result || t('남긴 글이 없어요.')).slice(0, 2000),
+    `## ${t('이번에 할 일')}`, more || t('이 일이 중간에 멈췄어요. 작업 폴더의 파일을 먼저 확인해서 이미 된 것은 다시 하지 말고, 남은 부분을 끝내 주세요.'),
+  ].join('\n'));
+  h.continued = true;
+  broadcast({ type: 'history-update', item: h });
+  save();
+  return [200, { ok: true, sentTo: [a.id] }];
 }
 
 // ───────────────────────── 윈도 도우미 ─────────────────────────
@@ -2895,6 +2942,9 @@ async function route(method, p, b) {
   if (method === 'DELETE' && p === '/api/history') { history = []; reports = []; plans = []; broadcast({ type: 'history-clear' }); save(); return OK; }
   if (method === 'POST' && p === '/api/shutdown') { setTimeout(shutdown, 150); return OK; }
 
+  const hm = p.match(/^\/api\/history\/([\w-]+)\/continue$/);
+  if (hm && method === 'POST') return apiContinue(hm[1], b);
+
   const pm = p.match(/^\/api\/plans\/([\w-]+)\/(start|cancel)$/);
   if (pm && method === 'POST') {
     const plan = plans.find(x => x.id === pm[1]);
@@ -3077,10 +3127,11 @@ function shutdown() {
   if (closing) return;
   closing = true;
   console.log(t('끄는 중이에요…'));
+  for (const a of agents) for (const q of a.queue) cutHistory(a, q.text, t('시작하기 전에 앱이 꺼졌어요'));   // 기다리던 일도 버리지 않고 남긴다
   for (const a of allAgents()) a.queue = [];
   for (const a of allAgents()) {
     // 하던 일은 프로세스를 끄기 전에 '중지'로 마무리한다 — 그냥 끄면 '예기치 않게 꺼졌어요' 오류로 남는다
-    if (a.current) endTurn(a, { status: 'stopped', text: t('앱을 꺼서 멈췄어요') });
+    if (a.current) endTurn(a, { status: 'stopped', text: t('앱을 꺼서 멈췄어요'), cut: 'shutdown' });
     if (a.proc) killProc(a);
   }
   if (ccrProc) forceKill(ccrProc);   // 관제실이 켠 CCR(과 게이트웨이)도 같이 끈다

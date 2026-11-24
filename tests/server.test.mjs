@@ -385,16 +385,86 @@ test('앱을 끄면 하던 일(허락을 기다리던 일 포함)은 오류가 �
     await send(srv, '파일 살펴봐 줘');   // 가짜 claude 는 npm test 를 돌려도 되는지 허락을 구하고 기다린다
     await send(srv, '기다려', 'a2');
     await srv.until(st => agentOf(st, 'a1').pending.length && said(st, 'a2').includes('일하는 중이에요.'), '허락 대기·일하는 중');
+    await send(srv, '빠르게 다음 일', 'a2');   // a2 뒤에서 기다리는 일
     await srv.stop();
     srv = await startServer({ home });
     const s = await srv.state();
-    assert.deepEqual(s.history.map(h => [h.agentId, h.status]).sort(), [['a1', 'stopped'], ['a2', 'stopped']]);
-    assert.deepEqual(s.history.map(h => h.result), ['앱을 꺼서 멈췄어요', '앱을 꺼서 멈췄어요'], '기록에 멈춘 까닭이 남는다');
+    const row = h => [h.agentId, h.prompt, h.status, h.result, h.cut];
+    assert.deepEqual(s.history.map(row).sort(), [
+      ['a1', '파일 살펴봐 줘', 'stopped', '앱을 꺼서 멈췄어요', 'shutdown'],
+      ['a2', '기다려', 'stopped', '앱을 꺼서 멈췄어요', 'shutdown'],
+      ['a2', '빠르게 다음 일', 'stopped', '시작하기 전에 앱이 꺼졌어요', 'shutdown'],   // 기다리던 일도 버리지 않고 남긴다
+    ], '하던 일·기다리던 일 모두 앱을 꺼서 멈춘 일로 남는다 (홈 화면 알림띠가 쓴다)');
     for (const id of ['a1', 'a2']) assert.ok(!logOf(s, id).some(e => /예기치 않게/.test(e.text || '')), `${id}: '예기치 않게 꺼졌어요'가 남았다`);
+    // 다시 켠 뒤 기록에서 '이어서 하기'를 비워 두고 누르면 같은 일꾼이 멈춘 부분부터 이어서 한다
+    const cut = s.history.find(h => h.agentId === 'a1');
+    const r = await srv.api('POST', `/api/history/${cut.id}/continue`, {});
+    assert.deepEqual(r.sentTo, ['a1']);
+    const after = await srv.until(st => logOf(st, 'a1').filter(e => e.k === 'user').length >= 2, '이어서 받은 일');
+    const sent = logOf(after, 'a1').filter(e => e.k === 'user').pop().text;
+    assert.match(sent, /^\[이어서 하기\]/);
+    assert.match(sent, /파일 살펴봐 줘/);
+    assert.match(sent, /남은 부분을 끝내 주세요/);
+    assert.equal(after.history.find(h => h.id === cut.id).continued, true);
   } finally {
     await srv.stop();
     removeDir(home);
   }
+});
+
+test('앱이 갑자기 꺼져도(정상 끄기 없이) 하던 일·기다리던 일이 다음에 켤 때 기록에 남아 이어서 할 수 있다', async () => {
+  const home = tempDir();
+  seed(home);
+  let srv = await startServer({ home });
+  try {
+    await send(srv, '기다려 말랑이 앱');
+    await srv.until(working('일하는 중이에요.'), '일하는 중');
+    await send(srv, '빠르게 버튼 고치기');
+    await new Promise(r => setTimeout(r, 900));   // 저장은 0.5초 묶어서 한다
+    await srv.kill();
+    srv = await startServer({ home });
+    const s = await srv.state();
+    assert.deepEqual(s.history.map(h => [h.prompt, h.status, h.result, h.cut]).sort(), [
+      ['기다려 말랑이 앱', 'stopped', '앱이 갑자기 꺼져서 멈췄어요', 'shutdown'],
+      ['빠르게 버튼 고치기', 'stopped', '시작하기 전에 앱이 꺼졌어요', 'shutdown'],
+    ]);
+    const queued = s.history.find(h => h.prompt === '빠르게 버튼 고치기');
+    await srv.api('POST', `/api/history/${queued.id}/continue`, {});
+    await srv.until(st => idle('a1')(st) && st.history.length === 3, '이어서 한 일 끝남');
+    await srv.stop();
+    srv = await startServer({ home });
+    assert.equal((await srv.state()).history.length, 3, '정상으로 끈 뒤에는 같은 일을 또 남기지 않는다');
+  } finally {
+    await srv.stop();
+    removeDir(home);
+  }
+});
+
+test('이어서 하기: 끝낸 일에 이어서 시킬 일을 적으면 같은 일꾼이 앞선 일·결과와 함께 받고, 비워 두면 거절한다', async () => {
+  await withServer({ seed: { agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] } }, async srv => {
+    await send(srv, '빠르게 첫 화면 만들어 줘', 'a2');
+    let s = await srv.until(st => idle('a2')(st) && st.history.length === 1, '첫 일 끝남');
+    const h = s.history[0];
+    assert.equal((await srv.raw('POST', `/api/history/${h.id}/continue`, { text: '  ' })).status, 400, '끝낸 일은 이어서 할 내용이 있어야 한다');
+    const r = await srv.api('POST', `/api/history/${h.id}/continue`, { text: '빠르게 버튼 색 바꿔 줘' });
+    assert.deepEqual(r.sentTo, ['a2'], '그 일을 했던 일꾼에게 간다');
+    s = await srv.until(st => idle('a2')(st) && st.history.length === 2, '이어서 한 일 끝남');
+    const sent = logOf(s, 'a2').filter(e => e.k === 'user').pop().text;
+    assert.match(sent, /빠르게 첫 화면 만들어 줘/);
+    assert.match(sent, /빠르게 버튼 색 바꿔 줘/);
+    assert.match(sent, /완료/, '그때 결과(완료)도 같이 간다');
+    assert.equal((await srv.raw('POST', '/api/history/nope/continue', { text: 'x' })).status, 404);
+  });
+});
+
+test('이어서 하기: 그 일을 했던 일꾼이 없으면 가장 한가한 일꾼이 받는다', async () => {
+  await withServer({ seed: { agents: [{ id: 'a1', name: '일꾼 1' }, { id: 'a2', name: '일꾼 2' }] } }, async srv => {
+    await send(srv, '빠르게 만들어 줘', 'a2');
+    const s = await srv.until(st => idle('a2')(st) && st.history.length === 1, '일 끝남');
+    await srv.api('DELETE', '/api/agents/a2');
+    const r = await srv.api('POST', `/api/history/${s.history[0].id}/continue`, { text: '빠르게 마저 해 줘' });
+    assert.deepEqual(r.sentTo, ['a1']);
+  });
 });
 
 test('팀 게시판: 팀장의 약속이 첫 글, 일꾼은 게시판을 받아 일하고 끝나면 [게시판] 소식을 올리며, 뒤 조각은 앞 소식을 받는다 (.team-board.md·결과 모으기에도)', async () => {

@@ -121,7 +121,9 @@ export async function startServer({ home, args = [], env = {}, ccr = false } = {
     clearTimeout(timer);
     if (proc.exitCode == null) proc.kill();
   };
-  return { home, port, base, token, cookie, raw, api, state, until, stop, output: () => output.join('') };
+  // 정상 끄기를 거치지 않고 프로세스를 바로 죽인다 (앱이 갑자기 꺼지거나 PC 가 꺼진 것처럼)
+  const kill = async () => { proc.kill('SIGKILL'); await exited; };
+  return { home, port, base, token, cookie, raw, api, state, until, stop, kill, output: () => output.join('') };
 }
 
 // 서버가 찍은 '한 번만 쓰는 창 주소'의 번호들 (찍힌 차례대로)

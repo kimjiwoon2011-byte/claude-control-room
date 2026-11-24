@@ -778,6 +778,14 @@
   .board-head .mascot { width: 24px; height: 19.5px; }
   .board-head .link { margin-left: auto; padding: 0; border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; }
   .board-head .link:hover { color: var(--text); }
+  /* 홈 알림띠: 앱을 끌 때 멈춘 일 */
+  .resume-bar { width: min(780px, 100%); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 10px; background: var(--panel); }
+  .resume-bar .rb-text { flex: 1 1 260px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text); min-width: 0; }
+  .resume-bar .rb-text small { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 기록의 '이어서 하기' */
+  .h-cont-row { display: flex; gap: 6px; margin-top: 6px; }
+  .h-cont-row input { flex: 1; min-width: 0; }
+  .h-cont-note { margin: 6px 0 0; font-size: 12px; }
   .rep-row {
     --c: var(--accent);
     display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 10px;
@@ -1215,6 +1223,7 @@
           </span>
         </div>
         <div class="crew" id="crew"></div>
+        <div class="resume-bar" id="resumeBar" hidden></div>
         <div class="board" id="planBoard" hidden></div>
         <div class="board" id="board" hidden></div>
         <p class="hint" data-i18n="hint"><span class="hint-arrow">←</span> 화면 왼쪽 끝에 마우스를 대면 메뉴가 나와요 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 줄바꿈 · <kbd>Alt</kbd>+<kbd>1</kbd>~<kbd>6</kbd> 창 바꾸기</p>
@@ -1899,6 +1908,7 @@ function onMessage(m) {
         row.outerHTML = histHTML(m.item);
         if (open) $(`#hist details[data-hid="${CSS.escape(m.item.id)}"]`).open = true;
       }
+      renderResumeBar();
       break;
     }
     case 'log': onLog(m.id, m.entry); break;
@@ -3164,6 +3174,7 @@ function renderHistory() {
   renderHistoryFilter();
   const items = S.history.filter(h => S.histFilter === 'all' || h.agentId === S.histFilter);
   $('#hist').innerHTML = items.length ? items.map(histHTML).join('') : `<div class="empty">${t('아직 끝난 작업이 없어요.')}</div>`;
+  renderResumeBar();
 }
 
 function histHTML(h) {
@@ -3184,8 +3195,45 @@ function histHTML(h) {
       <div class="h-sec"><span class="lbl">${h.status === 'error' ? t('오류 내용') : t('마지막 답')}</span>${h.result ? `<div class="h-result">${fmt(h.result)}</div>` : `<p class="muted" style="margin:6px 0 0">${t('남긴 글이 없어요.')}</p>`}</div>
       ${h.preview ? `<div class="h-sec"><button type="button" class="btn small" data-act="preview" data-h="${esc(h.id)}">${t('미리 보기')} · <code>${esc(h.preview)}</code></button></div>` : ''}
       ${rv ? `<div class="h-sec"><span class="lbl">${t('감독관 보고')}</span>${rv.work ? `<p style="margin:6px 0 0">${esc(rv.work)}</p>` : ''}<p style="margin:6px 0 0"${rv.work ? ' class="muted"' : ''}>${rv.verdict === 'pass' ? `✓ ${t('통과')}` : `✕ ${t('고칠 점 있음')}`} — ${esc(rv.summary)}</p></div>` : ''}
+      ${contHTML(h)}
     </div>
   </details>`;
+}
+
+// 기록의 '이어서 하기': 그 일을 했던 일꾼(없으면 가장 한가한 일꾼)이 앞선 일·결과와 함께 받는다. 멈춘 일은 비워 두면 남은 부분을 끝낸다
+function contHTML(h) {
+  const a = agentById(h.agentId);
+  const hint = h.status === 'done' ? t('이어서 시킬 일을 적어 주세요 (예: 버튼을 더 크게 해 줘)') : t('비워 두면 멈춘 부분부터 이어서 해요');
+  const who = a ? t('{name}{ga} 앞선 일과 결과를 함께 받아요.', { name: a.name, ga: josa(a.name, '이', '가') }) : t('이 일을 한 일꾼이 없어서 가장 한가한 일꾼이 이어서 해요.');
+  return `<div class="h-sec"><span class="lbl">${t('이어서 하기')}</span>
+      <div class="h-cont-row"><input type="text" data-h-in="${esc(h.id)}" maxlength="4000" placeholder="${esc(hint)}" aria-label="${esc(t('이어서 시킬 일'))}"><button type="button" class="btn small primary" data-act="continue" data-h="${esc(h.id)}">${t('이어서 하기')}</button></div>
+      <p class="muted h-cont-note">${esc(who)}${h.continued ? ` · ${t('이어서 맡겼어요')}` : ''}</p>
+    </div>`;
+}
+
+// 홈 알림띠: 앱을 끌 때 멈춘 일(cut === 'shutdown') 중 아직 이어서 하지 않은 것. 닫으면 이 브라우저에서만 숨긴다
+const RESUME_KEY = 'agents-resume-closed';
+function resumeClosed() {
+  try { return JSON.parse(localStorage.getItem(RESUME_KEY) || '[]'); } catch { return []; }
+}
+const resumeItems = () => { const closed = resumeClosed(); return S.history.filter(h => h.cut === 'shutdown' && !h.continued && !closed.includes(h.id)); };
+function renderResumeBar() {
+  const bar = $('#resumeBar');
+  const items = resumeItems();
+  bar.hidden = !items.length;
+  if (!items.length) return;
+  bar.innerHTML = `<span class="rb-text">${esc(t('앱을 끌 때 멈춘 일이 {n}개 있어요', { n: items.length }))}<small>${esc(items.slice(0, 3).map(h => `${h.agentName}: ${firstLine(h.prompt)}`).join(' · '))}</small></span>
+    <button type="button" class="btn small primary" data-act="resume-all">${t('모두 이어서 하기')}</button>
+    <button type="button" class="btn small" data-act="resume-see">${t('기록에서 보기')}</button>
+    <button type="button" class="icon-btn" data-act="resume-close" title="${esc(t('닫기'))}" aria-label="${esc(t('닫기'))}"><svg class="i" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>`;
+}
+
+async function continueItem(id, text = '') {
+  const r = await api('POST', `/api/history/${id}/continue`, { text });
+  if (!r) return false;
+  const a = agentById(r.sentTo[0]);
+  toast(t('{name}에게 이어서 맡겼어요', { name: a?.name || '' }), 'ok');
+  return true;
 }
 
 // ── 설정 ──
@@ -3560,6 +3608,24 @@ function wire() {
         break;
       case 'stop-all': api('POST', '/api/stop-all'); break;
       case 'preview': { const h = S.history.find(x => x.id === el.dataset.h); if (h) openPreview(h); break; }
+      case 'continue': {
+        const input = $(`[data-h-in="${CSS.escape(el.dataset.h)}"]`);
+        el.disabled = true;
+        if (await continueItem(el.dataset.h, input?.value || '') && input) input.value = '';
+        el.disabled = false;
+        break;
+      }
+      case 'resume-all': {
+        el.disabled = true;
+        for (const h of resumeItems()) await continueItem(h.id);
+        el.disabled = false;
+        break;
+      }
+      case 'resume-see': S.histFilter = 'all'; showView('history'); renderHistory(); break;
+      case 'resume-close':
+        try { localStorage.setItem(RESUME_KEY, JSON.stringify([...resumeClosed(), ...resumeItems().map(h => h.id)].slice(-200))); } catch { /* 저장이 막혀도 이번만 숨긴다 */ }
+        $('#resumeBar').hidden = true;
+        break;
       case 'pv-reload': if (previewing) $('#previewFrame').src = previewUrl(previewing.agentId, previewing.preview); break;
       case 'pv-folder': if (previewing) api('POST', `/api/agents/${previewing.agentId}/open`); break;
       case 'pv-close': closePreview(); break;
@@ -3894,6 +3960,12 @@ function wire() {
     if (!chip) return;
     S.histFilter = chip.dataset.hf;
     renderHistory();
+  });
+  // '이어서 하기' 칸에서 Enter 를 누르면 옆 버튼을 누른 것과 같다
+  $('#hist').addEventListener('keydown', e => {
+    if (!isEnter(e) || !e.target.matches('[data-h-in]')) return;
+    e.preventDefault();
+    $(`[data-act="continue"][data-h="${CSS.escape(e.target.dataset.hIn)}"]`, $('#hist'))?.click();
   });
 
   // 설정
